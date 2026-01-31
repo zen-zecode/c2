@@ -384,12 +384,9 @@ HELPER SCRIPTS:
 
 "@ -ForegroundColor Cyan
 
-# Ask to start now
-$startNow = Read-Host "Start the agent now? (y/n)"
-if ($startNow -eq "y" -or $startNow -eq "Y") {
-    Write-Step "Starting C2 Agent..."
-    Start-ScheduledTask -TaskName "C2Agent"
-    Write-Success "Agent started! It will register with your C2 server."
-}
+# Auto-start the agent
+Write-Step "Starting C2 Agent..."
+Start-ScheduledTask -TaskName "C2Agent"
+Write-Success "Agent started! It will register with your C2 server."
 
 Write-Host "`nDone!" -ForegroundColor Green
