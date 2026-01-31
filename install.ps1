@@ -201,13 +201,17 @@ Write-Step "Creating requirements.txt..."
 
 $requirementsPath = Join-Path $InstallPath "requirements.txt"
 
-@"
-python-telegram-bot>=21.0
+if (-not (Test-Path $requirementsPath)) {
+    @"
 python-dotenv>=1.0.0
-httpx>=0.27.0
+httpx
+python-telegram-bot
+pynput
 "@ | Set-Content -Path $requirementsPath -Encoding UTF8
-
-Write-Success "Created requirements.txt"
+    Write-Success "Created requirements.txt"
+} else {
+    Write-Success "requirements.txt already exists, skipping creation"
+}
 
 # =============================================================================
 # STEP 6: Install Dependencies
