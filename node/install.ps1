@@ -20,7 +20,8 @@
 #Requires -RunAsAdministrator
 
 param(
-    [string]$InstallPath = "$env:USERPROFILE\C2Agent"
+    [string]$InstallPath = "$env:USERPROFILE\C2Agent",
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -156,8 +157,8 @@ $agentPyPath = Join-Path $InstallPath "agent.py"
 # Check if existing agent.py is a placeholder or invalid
 if (Test-Path $agentPyPath) {
     $content = Get-Content -Path $agentPyPath -Raw -ErrorAction SilentlyContinue
-    if ($content -match "Placeholder" -or $content.Length -lt 1000) {
-        Write-Warn "Detected invalid/placeholder agent.py. Overwriting..."
+    if ($content -match "Placeholder" -or $content.Length -lt 1000 -or $PSBoundParameters['Force']) {
+        Write-Warn "Detected invalid/placeholder agent.py or Force used. Overwriting..."
         Remove-Item $agentPyPath -Force
     }
 }
