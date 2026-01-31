@@ -153,6 +153,15 @@ if (-not (Test-Path $InstallPath)) {
 
 $agentPyPath = Join-Path $InstallPath "agent.py"
 
+# Check if existing agent.py is a placeholder or invalid
+if (Test-Path $agentPyPath) {
+    $content = Get-Content -Path $agentPyPath -Raw -ErrorAction SilentlyContinue
+    if ($content -match "Placeholder" -or $content.Length -lt 1000) {
+        Write-Warn "Detected invalid/placeholder agent.py. Overwriting..."
+        Remove-Item $agentPyPath -Force
+    }
+}
+
 if (-not (Test-Path $agentPyPath)) {
     Write-Host "Downloading agent.py from repository..." -ForegroundColor Yellow
     
