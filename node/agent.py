@@ -165,23 +165,41 @@ class PersistentTaskManager:
 # =============================================================================
 
 async def action_screenshot(task: PersistentTask, iteration: int) -> Optional[str]:
-    """Capture a screenshot and save to disk."""
+    """Capture a screenshot with High-DPI and Multi-Monitor support."""
     if platform.system() != "Windows":
         return None
     
     try:
-        # PowerShell screenshot capture
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"screenshot_{task.task_id[:8]}_{timestamp}.png"
         filepath = SCREENSHOTS_DIR / filename
         
+        # Updated PowerShell script for High-DPI and Multi-Monitor support
         ps_script = f'''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+
+# High-DPI Awareness
+$code = @'
+[DllImport("user32.dll")]
+public static extern bool SetProcessDPIAware();
+'@
+try {{
+    $win32 = Add-Type -MemberDefinition $code -Name "Win32" -Namespace Win32 -PassThru
+    $win32::SetProcessDPIAware() | Out-Null
+}} catch {{
+    # DPI Awareness might already be set or failed, continue anyway
+    Write-Host "DPI Awareness warning: $_"
+}}
+
+# Capture VirtualScreen (covers all monitors)
+$screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+
+# Copy from VirtualScreen coordinates (SourceX, SourceY) to (0,0) with specified size
+$graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $screen.Size)
+
 $bitmap.Save("{filepath}")
 $graphics.Dispose()
 $bitmap.Dispose()
@@ -198,7 +216,7 @@ $bitmap.Dispose()
             print(f"[SCREENSHOT] Captured: {filename}")
             return str(filepath)
         else:
-            print(f"[SCREENSHOT] Failed: {result.stderr[:100]}")
+            print(f"[SCREENSHOT] Failed: {result.stderr[:200]}")
             return None
             
     except Exception as e:
