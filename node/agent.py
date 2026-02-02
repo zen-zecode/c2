@@ -1135,7 +1135,9 @@ async def process_task(
 ) -> Tuple[str, bool, Dict[str, Any]]:
     """Process a task based on type with smart success detection."""
     
-    task_type = task.get('command_type', 'shell')
+    # Normalize task_type (API may send command_type or commandType; support hyphen variant)
+    raw_type = task.get('command_type') or task.get('commandType') or 'shell'
+    task_type = str(raw_type).strip().lower().replace('-', '_')
     command = task.get('command', '')
     reasoning = task.get('reasoning', '')
     task_id = task.get('id', '')
@@ -1237,16 +1239,27 @@ async def process_task(
     # === SELF DESTRUCT ===
     elif task_type == 'self_destruct':
         try:
-            data = json.loads(command) if command else {}
+            # Parse command (may be raw JSON or have extra chars from display)
+            cmd_str = (command or '').strip()
+            # Extract JSON if wrapped (e.g. "⚠️ {...}" from dashboard display)
+            if '{' in cmd_str:
+                start = cmd_str.index('{')
+                end = cmd_str.rindex('}') + 1
+                cmd_str = cmd_str[start:end]
+            data = json.loads(cmd_str) if cmd_str else {}
             confirmed = data.get('confirm', False)
+            if isinstance(confirmed, str):
+                confirmed = confirmed.lower() in ('true', '1', 'yes')
             
             if not confirmed:
-                return "Self-destruct requires explicit confirmation", False, extra_data
+                return "Self-destruct requires explicit confirmation (confirm: true)", False, extra_data
             
             # This will not return - agent will terminate
             output, success = await self_destruct()
             return output, success, extra_data
             
+        except json.JSONDecodeError as e:
+            return f"Self-destruct invalid command (need confirm: true): {e}", False, extra_data
         except Exception as e:
             return f"Self-destruct failed: {e}", False, extra_data
     
