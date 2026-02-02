@@ -1038,12 +1038,12 @@ async def self_destruct() -> Tuple[str, bool]:
         # Kill by CommandLine (matches install.ps1 logic) so we catch pythonw/python with agent.py
         kill_ps = "Get-WmiObject Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
-        # PowerShell script: wait 5s so all handles released, read paths file, Remove-Item each dir, delete paths file
+        # PowerShell script: wait so agent/batch exit and release handles, then read paths file and Remove-Item
         delete_ps1 = temp_dir / 'cleanup_delete.ps1'
         delete_ps1.write_text('''
 $pathsFile = Join-Path $env:TEMP "cleanup_paths.txt"
 if (-not (Test-Path $pathsFile)) { exit 0 }
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 10
 $dirs = Get-Content $pathsFile -ErrorAction SilentlyContinue
 foreach ($d in $dirs) {
     $d = $d.Trim()
@@ -1073,9 +1073,6 @@ taskkill /F /FI "IMAGENAME eq pythonw.exe" >nul 2>&1
 taskkill /F /FI "IMAGENAME eq python.exe" >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-echo [SELF_DESTRUCT] Phase 3: Deleting files (PowerShell, 5s delay)...
-start /b powershell -NoProfile -ExecutionPolicy Bypass -File "{delete_ps1}"
-
 del "%~f0"
 '''
         
@@ -1095,7 +1092,27 @@ del "%~f0"
         except:
             pass
         
-        # Execute the batch script in the background (detached)
+        # Start PowerShell delete script directly as detached process (survives when agent exits)
+        # Batch "start /b" children die when batch exits; agent-started detached process keeps running
+        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0)
+        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+        try:
+            subprocess.Popen(
+                [
+                    'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                    '-WindowStyle', 'Hidden', '-File', str(delete_ps1.resolve())
+                ],
+                cwd=str(temp_dir),
+                creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+        
+        # Execute batch (persistence + kill); runs after delete script is already started
         subprocess.Popen(
             ['cmd', '/c', str(batch_path)],
             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else subprocess.CREATE_NO_WINDOW,
