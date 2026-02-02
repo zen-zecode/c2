@@ -1022,22 +1022,40 @@ async def self_destruct() -> Tuple[str, bool]:
     
     try:
         install_dir = get_install_dir()
-        install_dir_str = str(install_dir).replace('"', '""')
-        data_dir_str = str(DATA_DIR).replace('"', '""')
+        temp_dir = Path(os.environ.get('TEMP', '/tmp'))
+        paths_file = temp_dir / 'cleanup_paths.txt'
+        batch_path = temp_dir / 'cleanup_temp.bat'
 
         print(f"[SELF_DESTRUCT] Install dir: {install_dir}, Data dir: {DATA_DIR}")
         cleanup_report = []
 
+        # Write paths to file so batch/PowerShell get exact paths (no escaping issues)
+        paths_file.write_text(
+            str(install_dir.resolve()) + '\n' + str(DATA_DIR.resolve()),
+            encoding='utf-8'
+        )
+
         # Kill by CommandLine (matches install.ps1 logic) so we catch pythonw/python with agent.py
         kill_ps = "Get-WmiObject Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
-        # Create a self-deleting batch script. Order matters:
-        # 1) cd out of install dir so nothing holds a lock on SystemCache (cmd inherits agent CWD)
-        # 2) Remove persistence (tasks, registry, shortcuts)
-        # 3) Kill agent so folders are not in use
-        # 4) Delete folders (only after process stopped and CWD no longer inside them)
+        # PowerShell script: wait 5s so all handles released, read paths file, Remove-Item each dir, delete paths file
+        delete_ps1 = temp_dir / 'cleanup_delete.ps1'
+        delete_ps1.write_text('''
+$pathsFile = Join-Path $env:TEMP "cleanup_paths.txt"
+if (-not (Test-Path $pathsFile)) { exit 0 }
+Start-Sleep -Seconds 5
+$dirs = Get-Content $pathsFile -ErrorAction SilentlyContinue
+foreach ($d in $dirs) {
+    $d = $d.Trim()
+    if ($d -and (Test-Path -LiteralPath $d)) {
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Remove-Item $pathsFile -Force -ErrorAction SilentlyContinue
+''', encoding='utf-8')
+
+        # Create batch: cd out of install dir, persistence, kill, then launch PowerShell script (runs delayed delete in background)
         batch_script = f'''@echo off
-REM Step 0: Leave install dir so rmdir can delete it (cmd inherited agent CWD = SystemCache\\venv)
 cd /d "%TEMP%"
 
 echo [SELF_DESTRUCT] Phase 1: Removing persistence...
@@ -1055,15 +1073,12 @@ taskkill /F /FI "IMAGENAME eq pythonw.exe" >nul 2>&1
 taskkill /F /FI "IMAGENAME eq python.exe" >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-echo [SELF_DESTRUCT] Phase 3: Deleting files...
-if exist "{install_dir_str}" rmdir /S /Q "{install_dir_str}" >nul 2>&1
-if exist "{data_dir_str}" rmdir /S /Q "{data_dir_str}" >nul 2>&1
+echo [SELF_DESTRUCT] Phase 3: Deleting files (PowerShell, 5s delay)...
+start /b powershell -NoProfile -ExecutionPolicy Bypass -File "{delete_ps1}"
 
 del "%~f0"
 '''
         
-        # Write the batch script to temp
-        batch_path = Path(os.environ.get('TEMP', '/tmp')) / 'cleanup_temp.bat'
         batch_path.write_text(batch_script, encoding='utf-8')
         
         cleanup_report.append("✓ Cleanup script created")
