@@ -151,10 +151,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ### Dashboard
 - 🔐 Password-protected access
 - 📡 Broadcast commands to all nodes
-- 🤖 AI-powered natural language commands
+- 🤖 AI-powered natural language commands with reasoning
 - 📊 Real-time node status monitoring
 - 📋 Task log viewer with output display
 - 📎 Telegram file download links
+- ⚡ Multi-model AI with automatic fallback
+- 🛡️ Destructive command approval system
 
 ### Node Agent
 - 🔄 10-second polling interval
@@ -163,12 +165,16 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 - 📤 File upload to Telegram
 - 🔁 Auto-restart on failure
 - 👻 Background execution (no console window)
+- 📸 Full-screen screenshots with DPI scaling support
+- 💣 Self-destruct capability (complete removal)
 
 ### AI Commands
 Natural language commands are processed by Workers AI:
 - "Check disk space on all nodes"
 - "Install Chrome on NODE_ID"
 - "Upload the hosts file from all machines"
+- "Take a screenshot" (handles DPI scaling automatically)
+- "Self destruct" (removes agent completely - requires approval)
 
 ## Security
 

