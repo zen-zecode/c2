@@ -204,7 +204,12 @@ httpx>=0.27.0
 pynput>=1.7.0
 "@ | Set-Content -Path $reqFile -Encoding UTF8
 
-    & $venvPython -m pip install -r $reqFile --quiet --disable-pip-version-check | Out-Null
+    # Install uv first (extremely fast installer)
+    & $venvPython -m pip install uv --quiet --disable-pip-version-check | Out-Null
+
+    # Use uv to install dependencies
+    $uvExe = Join-Path $venvPath "Scripts\uv.exe"
+    & $uvExe pip install -r $reqFile --python $venvPython --quiet | Out-Null
 
     # 5. Scheduled Task / Persistence
     # -------------------------------------------------------------------------

