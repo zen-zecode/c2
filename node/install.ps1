@@ -29,8 +29,12 @@ param(
     [string]$InstallPath = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache",
     [string]$Mode = "", # Options: "Admin", "Normal", or empty for prompt
     [switch]$Force,
-    [switch]$Silent  # Skip all prompts
+    [switch]$Silent,  # Skip all prompts
+    [Alias("y")][switch]$Yes  # Alias: -y to skip prompts (same as -Silent)
 )
+
+# Unify -y and -Silent: if either is set, skip all prompts
+if ($Yes) { $Silent = [switch]::Present }
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"

