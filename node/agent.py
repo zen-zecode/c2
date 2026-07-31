@@ -555,8 +555,11 @@ public class ScreenCapture {{
 }}
 '@
 
-$dims = [ScreenCapture]::CaptureScreen("{filepath}")
+$dims = [ScreenCapture]::CaptureScreen(@'
+{filepath.as_posix()}
+'@)
 Write-Host "Captured: $dims"
+Write-Host "PATH:{filepath}"
 '''
         result = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
@@ -568,12 +571,16 @@ Write-Host "Captured: $dims"
         
         if filepath.exists() and filepath.stat().st_size > 1000:
             file_size = filepath.stat().st_size
-            # Extract dimensions from output
             dims = "unknown"
             if result.stdout and "Captured:" in result.stdout:
-                dims = result.stdout.split("Captured:")[-1].strip()
+                dims = result.stdout.split("Captured:")[-1].split("PATH:")[0].strip()
             
-            return f"Screenshot captured: {filepath}\nResolution: {dims}\nSize: {file_size // 1024}KB", True
+            return (
+                f"Screenshot captured: {filepath}\n"
+                f"Resolution: {dims}\n"
+                f"Size: {file_size // 1024}KB\n"
+                f"PATH:{filepath}"
+            ), True
         else:
             return f"Screenshot failed: {result.stderr or result.stdout}", False
             
@@ -1211,6 +1218,13 @@ def detect_task_success(output: str, task_type: str, command: str) -> Tuple[bool
         if 'uploaded' in output_lower or 'file_id' in output_lower:
             return True, "File uploaded successfully"
         return False, "Upload may have failed"
+
+    elif task_type == 'screenshot':
+        if 'screenshot captured' in output_lower or (
+            '.png' in output_lower and 'failed' not in output_lower and 'error' not in output_lower
+        ):
+            return True, "Screenshot captured"
+        return False, "Screenshot may have failed"
     
     elif task_type == 'install':
         if 'successfully' in output_lower or 'installed' in output_lower:
@@ -1264,6 +1278,19 @@ async def process_task(
             
         output, success, tg_data = await upload_to_telegram(file_path)
         return output, success, tg_data
+
+    # === BUILT-IN SCREENSHOT (preferred over AI-generated PS) ===
+    elif task_type == 'screenshot':
+        print("[SCREENSHOT] Using built-in capture_single_screenshot()")
+        output, success = await capture_single_screenshot()
+        if success:
+            # Prefer a clean path line for the AI / upload step
+            for line in output.splitlines():
+                if line.strip().lower().startswith('screenshot captured:'):
+                    path = line.split(':', 1)[1].strip()
+                    return f"Screenshot captured: {path}\n{output}", True, extra_data
+            return output, True, extra_data
+        return output, False, extra_data
     
     # === SOFTWARE INSTALL ===
     elif task_type == 'install':
