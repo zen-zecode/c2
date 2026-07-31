@@ -72,22 +72,39 @@ try {
     $pythonPath = Find-Python
 
     if (-not $pythonPath) {
-        Write-Info "Python not found. Trying winget install Python.Python.3.12..."
+        Write-Info "Python not found. Trying automatic install via winget (user scope)..."
+        $winget = Get-Command winget -ErrorAction SilentlyContinue
+        if (-not $winget) {
+            Write-ErrLog "winget not found on this PC. Install 'App Installer' from Microsoft Store, or install Python manually."
+            Write-Host "[1]"
+            return
+        }
+        Write-Info "winget: $($winget.Source)"
         try {
-            winget install Python.Python.3.12 `
+            $wgOut = & winget install -e --id Python.Python.3.12 `
+                --scope user `
                 --accept-source-agreements `
                 --accept-package-agreements `
                 --silent `
-                --disable-interactivity
-            Start-Sleep -Seconds 3
+                --disable-interactivity 2>&1 | Out-String
+            Write-Host $wgOut
+            Start-Sleep -Seconds 5
+            Refresh-Path
             $pythonPath = Find-Python
+            if (-not $pythonPath) {
+                # winget sometimes finishes before files are on PATH — wait and retry
+                Write-Info "Python still not on PATH, waiting 10s and retrying..."
+                Start-Sleep -Seconds 10
+                Refresh-Path
+                $pythonPath = Find-Python
+            }
         } catch {
             Write-ErrLog "winget install failed: $($_.Exception.Message)"
         }
     }
 
     if (-not $pythonPath) {
-        Write-ErrLog "Python not found after winget. Install Python 3 manually and re-run."
+        Write-ErrLog "Python still missing after winget. Install from https://www.python.org/downloads/ (check 'Add to PATH') then re-run."
         Write-Host "[1]"
         return
     }
